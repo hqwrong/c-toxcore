@@ -287,23 +287,19 @@ int readline(char *linebuf, int size){
 }
 
 // caller makes sure args doesn't overflow
-int parseline(char *line,char **tokens, int ntokens) {
+int parseline(char *line,char **tokens) {
     char dem = ' ';
     char *tok_begin = NULL;
-    int j = 0;
+    int n = 0;
     for (int i = 0;;i++) {
         if (line[i] == '\0'){
             if (tok_begin != NULL) {
-                tokens[j++] = tok_begin;
+                tokens[n++] = tok_begin;
             }
-            return j;
+            return n;
         }
         if (line[i] == dem && tok_begin != NULL) {
-            ntokens--;
-            tokens[j++] = tok_begin;
-            if (ntokens == 0) { // if this is the last token, the return the rest.
-                return j;
-            }
+            tokens[n++] = tok_begin;
             line[i] = '\0';
         }
 
@@ -336,9 +332,11 @@ void repl_iterate(){
     buf[strlen(buf)-1] = '\0';
     if (buf[0] == '/') {
         buf++;
+        char **tokens[COMMAND_ARGS_REST];
+        int ntok = parseline(buf, tokens);
         for (int i=0;i<sizeof(commands)/sizeof(struct Command);i++){
-            if (strcmp(commands[i].name, buf) == 0) {
-                commands[i].handler(0, NULL);
+            if (strcmp(commands[i].name, tokens[0]) == 0) {
+                commands[i].handler(ntok-1, tokens+1);
                 goto REPL_NEXT;
             }
         }
