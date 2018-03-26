@@ -10,7 +10,7 @@
 #include <fcntl.h>
 
 #include <sodium/utils.h>
-#include <tox/tox.h>
+#include <tox.h>
 
 Tox *tox;
 
@@ -65,8 +65,8 @@ struct AsyncREPL {
     char *line;
     char *prompt;
     size_t sz;
-    size_t nbuf;
-    size_t nstack;
+    int  nbuf;
+    int nstack;
 };
 
 struct termios saved_tattr;
@@ -100,22 +100,30 @@ void setup_arepl() {
 void arepl_reprint(struct AsyncREPL *arepl) {
     fputs(CODE_ERASE_LINE, stdout);
     if (arepl->prompt) fputs(arepl->prompt, stdout);
-    if (arepl->nbuf > 0) printf("%.*s", (int)arepl->nbuf, arepl->line);
+    if (arepl->nbuf > 0) printf("%.*s", arepl->nbuf, arepl->line);
     if (arepl->nstack > 0) {
-        printf("%.*s",(int)arepl->nstack, arepl->line - arepl->nstack);
-        printf("\033[%zuD",arepl->nstack); // move cursor
+        printf("%.*s",(int)arepl->nstack, arepl->line + arepl->sz - arepl->nstack);
+        printf("\033[%dD",arepl->nstack); // move cursor
     }
     fflush(stdout);
 }
 
-#define _AREPL_CURSOR_LEFT() arepl->line[arepl->sz - (arepl->nstack++)] = arepl->line[--arepl->nbuf]
-#define _AREPL_CURSOR_RIGHT() arepl->line[arepl->nbuf++] = arepl->line[arepl->sz - (--arepl->nstack)]
+#define _AREPL_CURSOR_LEFT() arepl->line[arepl->sz - (++arepl->nstack)] = arepl->line[--arepl->nbuf]
+#define _AREPL_CURSOR_RIGHT() arepl->line[arepl->nbuf++] = arepl->line[arepl->sz - (arepl->nstack--)]
 
 int arepl_readline(struct AsyncREPL *arepl, char c, char *line, size_t sz){
+    static uint32_t escaped = 0;
+    if (c == '\033') { // mark escape code
+        escaped = 1;
+        return 0;
+    }
+
+    if (escaped>0) escaped++;
+
     switch (c) {
         case '\n':
             putchar('\n'); // open a new line
-            int ret = snprintf(line, sz, "%.*s%.*s\n",(int)arepl->nbuf, arepl->line, (int)arepl->nstack, arepl->line - arepl->nstack);
+            int ret = snprintf(line, sz, "%.*s%.*s\n",(int)arepl->nbuf, arepl->line, (int)arepl->nstack, arepl->line + arepl->sz - arepl->nstack);
             arepl->nbuf = 0;
             arepl->nstack = 0;
             return ret;
@@ -146,12 +154,13 @@ int arepl_readline(struct AsyncREPL *arepl, char c, char *line, size_t sz){
             while (arepl->nbuf>0 && arepl->line[arepl->nbuf-1] == ' ') arepl->nbuf--;
             while (arepl->nbuf>0 && arepl->line[arepl->nbuf-1] != ' ') arepl->nbuf--;
             break;
-        case '\104':
-        case '\103':
-            if (arepl->nbuf >= 2 && strncmp(arepl->line + arepl->nbuf - 2,"\033\133",2) == 0) { // left or right arrow
-                arepl->nbuf -= 2;
-                if (c == '\104' && arepl->nbuf > 0) _AREPL_CURSOR_LEFT(); // left arrow
-                if (c == '\103' && arepl->nstack > 0) _AREPL_CURSOR_RIGHT(); // right arrow
+
+        case 'D':
+        case 'C':
+            if (escaped == 3 && arepl->nbuf >= 1 && arepl->line[arepl->nbuf-1] == '[') { // arrow keys
+                arepl->nbuf--;
+                if (c == 'D' && arepl->nbuf > 0) _AREPL_CURSOR_LEFT(); // left arrow
+                if (c == 'C' && arepl->nstack > 0) _AREPL_CURSOR_RIGHT(); // right arrow
                 break;
             }
             // fall through to default case
@@ -587,6 +596,7 @@ void repl_iterate(){
             }
         }
     }
+
     arepl_reprint(async_repl);
 }
 
