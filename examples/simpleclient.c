@@ -25,6 +25,118 @@ typedef struct DHT_node {
 const char *savedata_filename = "savedata.tox";
 const char *savedata_tmp_filename = "savedata.tox.tmp";
 
+#define CODE_ERASE_LINE "\r\033[2K" 
+#define LINE_MAX_SIZE 2048
+
+#define INFO(_fmt,...) \
+    fputs(CODE_ERASE_LINE,stdout);\
+    printf(("\x01b[36m"_fmt"\x01b"),__VA_ARGS__);
+
+
+//////////////////////////
+// Async REPL
+/// //////////////////////
+
+struct AsyncREPL {
+    char *line;
+    const char *prompt;
+    size_t sz;
+    size_t nbuf;
+    size_t nstack;
+};
+
+struct termios saved_tattr;
+
+struct AsyncREPL *async_repl;
+
+void arepl_setup() {
+    async_repl = malloc(sizeof(struct AsyncREPL));
+    async_repl->nbuf = 0;
+    async_repl->nstack = 0;
+    async_repl->sz = LINE_MAX_SIZE;
+    async_repl->line = malloc(LINE_MAX_SIZE);
+    async_repl->prompt = NULL;
+
+    /* Set the Non-Canonical terminal mode. */
+    tcgetattr (STDIN_FILENO, &tattr);
+    saved_tattr = tattr;  // save it to restore when exit
+    tattr.c_lflag &= ~(ICANON|ECHO); /* Clear ICANON. */
+    tattr.c_cc[VMIN] = 1;
+    tattr.c_cc[VTIME] = 0;
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &tattr);
+
+    /* Set Non-Blocking stdin */
+    int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+    fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
+}
+
+void arepl_reprint(struct AsyncREPL *arepl) {
+    fputs(CODE_ERASE_LINE, stdout);
+    if (arepl->prompt) fputs(arepl->prompt, stdout);
+    if (arepl->nbuf > 0) printf("%.*s", (int)arepl->nbuf, arepl->line);
+    if (arepl->nstack > 0) {
+        printf("%.*s",(int)arepl->nstack, arepl->line - arepl->nstack);
+        printf("\033[%zuD",arepl->nstack); // move cursor
+    }
+    fflush(stdout);
+}
+
+#define _AREPL_CURSOR_LEFT() arepl->line[arepl->sz - (arepl->nstack++)] = arepl->line[--arepl->nbuf]
+#define _AREPL_CURSOR_RIGHT() arepl->line[arepl->nbuf++] = arepl->line[arepl->sz - (--arepl->nstack)]
+
+int arepl_readline(struct AsyncREPL *arepl, char c, char *line, size_t sz){
+    switch (c) {
+        case '\n':
+            putchar('\n'); // open a new line
+            int ret = snprintf(line, sz, "%.*s%.*s\n",(int)arepl->nbuf, arepl->line, (int)arepl->nstack, arepl->line - arepl->nstack);
+            arepl->nbuf = 0;
+            arepl->nstack = 0;
+            return ret;
+
+        case '\010':  // C-h
+        case '\177':  // Backspace
+            if (arepl->nbuf > 0) arepl->nbuf--;
+            break;
+        case '\025': // C-u
+            arepl->nbuf = 0;
+            break;
+        case '\013': // C-k Vertical Tab
+            arepl->nstack = 0;
+            break;
+        case '\001': // C-a
+            while (arepl->nbuf > 0) _AREPL_CURSOR_LEFT();
+            break;
+        case '\005': // C-e
+            while (arepl->nstack > 0) _AREPL_CURSOR_RIGHT();
+            break;
+        case '\002': // C-b
+            if (arepl->nbuf > 0) _AREPL_CURSOR_LEFT();
+            break;
+        case '\006': // C-f
+            if (arepl->nstack > 0) _AREPL_CURSOR_RIGHT();
+            break;
+        case '\027': // C-w: backward delete a word
+            while (arepl->nbuf>0 && arepl->line[arepl->nbuf-1] == ' ') arepl->nbuf--;
+            while (arepl->nbuf>0 && arepl->line[arepl->nbuf-1] != ' ') arepl->nbuf--;
+            break;
+        case '\104':
+        case '\103':
+            if (arepl->nbuf >= 2 && strncmp(arepl->line + arepl->nbuf - 2,"\033\133",2) == 0) { // left or right arrow
+                arepl->nbuf -= 2;
+                if (c == '\104' && arepl->nbuf > 0) _AREPL_CURSOR_LEFT(); // left arrow
+                if (c == '\103' && arepl->nstack > 0) _AREPL_CURSOR_RIGHT(); // right arrow
+                break;
+            }
+            // fall through to default case
+        default:
+            arepl->line[arepl->nbuf++] = c;
+    }
+    return 0;
+}
+
+////////////////////////
+// tox
+////////////////////////
 void create_tox()
 {
     struct Tox_Options options;
@@ -310,47 +422,44 @@ int parseline(char *line,char **tokens) {
 }
 
 void repl_iterate(){
-    static int firstcall = 1;
-    if (firstcall) {
-        firstcall = 0;
-        int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
-        fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
-        goto REPL_NEXT;
-    }
-
-    char linebuf[128];
-    memset(linebuf,0,sizeof(linebuf));
-    int ret = readline(linebuf, sizeof(linebuf));
-    if (ret == -1) {
+    static char buf[128];
+    static char line[LINE_MAX_SIZE];
+    int n = read(STDIN_FILENO, buf, sizeof(buf));
+    if (n <= 0) {
         return;
     }
-    if (ret == 0){
-        printf("\nbye.\n");
-        exit(0);
-    }
-    char *buf = linebuf;
-    buf[strlen(buf)-1] = '\0';
-    if (buf[0] == '/') {
-        buf++;
-        char **tokens[COMMAND_ARGS_REST];
-        int ntok = parseline(buf, tokens);
-        for (int i=0;i<sizeof(commands)/sizeof(struct Command);i++){
-            if (strcmp(commands[i].name, tokens[0]) == 0) {
-                commands[i].handler(ntok-1, tokens+1);
-                goto REPL_NEXT;
+    for (int i=0;i<n;i++) {
+        char c = buf[i];
+        if (c == '\004')          /* C-d */
+            return 0;
+        if (arepl_readline(async_repl, c, line, sizeof(line))) {
+            char *l = line;
+            l[strlen(l)-1] = '\0';
+            if (l[0] == '/') {
+                l++;
+                char **tokens[COMMAND_ARGS_REST];
+                int ntok = parseline(l, tokens);
+                for (int i=0;i<sizeof(commands)/sizeof(struct Command);i++){
+                    if (strcmp(commands[i].name, tokens[0]) == 0) {
+                        commands[i].handler(ntok-1, tokens+1);
+                        return;
+                    }
+                }
             }
+            printf("Invalid command: %s, try `/help` instead\n", buf);
         }
     }
-    printf("Invalid command: %s, try `/help` instead\n", buf);
-REPL_NEXT:
-    printf("> ");
-    fflush(stdout);
 }
 
+void exit_cb() {
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &saved_tattr);
+}
 
 int main() {
-    printf("setup tox ...\n");
+    INFO("setup tox ...\n");
     setup_tox();
+
+    atexit(exit_cb);
 
     while (1) {
         repl_iterate();
