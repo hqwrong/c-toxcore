@@ -41,8 +41,8 @@ const char *savedata_tmp_filename = "savedata.tox.tmp";
 #define CMD_PROMPT_COLOR   "\x01b[32m" // green
 
 #define CMD_PROMPT   CMD_PROMPT_COLOR "> " RESET_COLOR // green
-#define GUEST_TALK_PROMPT  GUEST_TALK_COLOR "%.12s | " RESET_COLOR
-#define SELF_TALK_PROMPT   SELF_TALK_COLOR "%.12s | " RESET_COLOR
+#define GUEST_TALK_PROMPT  GUEST_TALK_COLOR "%12.12s | " RESET_COLOR
+#define SELF_TALK_PROMPT   SELF_TALK_COLOR "%12.12s | " RESET_COLOR
 
 #define TALK_PROMPT_TIME_FORMAT  "hh:mm:ss"  // comment this line to disable display time
 
