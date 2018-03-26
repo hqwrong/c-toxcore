@@ -37,7 +37,8 @@ const char *savedata_tmp_filename = "savedata.tox.tmp";
 
 #define RESET_COLOR        "\x01b[0m"
 #define SELF_TALK_COLOR    "\x01b[32m"  // green
-#define GUEST_TALK_COLOR   "\x01b[35m" // magenta
+// #define GUEST_TALK_COLOR   "\x01b[35m" // magenta
+#define GUEST_TALK_COLOR   "\x01b[90m" // bright black
 #define CMD_PROMPT_COLOR   "\x01b[32m" // green
 
 #define CMD_PROMPT   CMD_PROMPT_COLOR "> " RESET_COLOR // green
