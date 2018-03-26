@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <termios.h>
 #include <unistd.h>
 #include <fcntl.h>
 
@@ -22,15 +23,38 @@ typedef struct DHT_node {
     unsigned char key_bin[TOX_PUBLIC_KEY_SIZE];
 } DHT_node;
 
+// I assume normal friend_number will not get to this value, for code's simplicity. Plz do not do this in any serious client.
+#define SELF_FRIENDNUM ~((uint32_t)0) 
+
+uint32_t TalkingTo = SELF_FRIENDNUM;
+
 const char *savedata_filename = "savedata.tox";
 const char *savedata_tmp_filename = "savedata.tox.tmp";
 
-#define CODE_ERASE_LINE "\r\033[2K" 
-#define LINE_MAX_SIZE 2048
+#define LINE_MAX_SIZE 1024
 
-#define INFO(_fmt,...) \
+#define CODE_ERASE_LINE    "\r\033[2K" 
+
+#define RESET_COLOR        "\x01b[0m"
+#define SELF_TALK_COLOR    "\x01b[32m"  // green
+#define GUEST_TALK_COLOR   "\x01b[35m" // magenta
+#define CMD_PROMPT_COLOR   "\x01b[32m" // green
+
+#define CMD_PROMPT   CMD_PROMPT_COLOR "> " RESET_COLOR // green
+#define GUEST_TALK_PROMPT  GUEST_TALK_COLOR "%-.12s | " RESET_COLOR
+#define SELF_TALK_PROMPT   SELF_TALK_COLOR "%-.12s | " RESET_COLOR
+
+#define TALK_PROMPT_TIME_FORMAT  "hh:mm:ss"  // comment this line to disable display time
+
+#define PRINT(_fmt, ...) \
     fputs(CODE_ERASE_LINE,stdout);\
-    printf(("\x01b[36m"_fmt"\x01b"),__VA_ARGS__);
+    printf(_fmt "\n", ##__VA_ARGS__);
+
+#define COLOR_PRINT(_color, _fmt,...) PRINT(_color _fmt RESET_COLOR, ##__VA_ARGS__)
+
+#define INFO(_fmt,...) COLOR_PRINT("\x01b[36m", _fmt, ##__VA_ARGS__)  // cyran
+#define WARN(_fmt,...) COLOR_PRINT("\x01b[33m", _fmt, ##__VA_ARGS__) // yellow
+#define ERROR(_fmt,...) COLOR_PRINT("\x01b[31m", _fmt, ##__VA_ARGS__) // red
 
 
 //////////////////////////
@@ -39,7 +63,7 @@ const char *savedata_tmp_filename = "savedata.tox.tmp";
 
 struct AsyncREPL {
     char *line;
-    const char *prompt;
+    char *prompt;
     size_t sz;
     size_t nbuf;
     size_t nstack;
@@ -49,16 +73,19 @@ struct termios saved_tattr;
 
 struct AsyncREPL *async_repl;
 
-void arepl_setup() {
+void setup_arepl() {
     async_repl = malloc(sizeof(struct AsyncREPL));
     async_repl->nbuf = 0;
     async_repl->nstack = 0;
     async_repl->sz = LINE_MAX_SIZE;
     async_repl->line = malloc(LINE_MAX_SIZE);
-    async_repl->prompt = NULL;
+    async_repl->prompt = malloc(LINE_MAX_SIZE);
+
+    strcpy(async_repl->prompt, CMD_PROMPT);
 
     /* Set the Non-Canonical terminal mode. */
-    tcgetattr (STDIN_FILENO, &tattr);
+    struct termios tattr;
+    tcgetattr(STDIN_FILENO, &tattr);
     saved_tattr = tattr;  // save it to restore when exit
     tattr.c_lflag &= ~(ICANON|ECHO); /* Clear ICANON. */
     tattr.c_cc[VMIN] = 1;
@@ -137,6 +164,41 @@ int arepl_readline(struct AsyncREPL *arepl, char c, char *line, size_t sz){
 ////////////////////////
 // tox
 ////////////////////////
+
+char* get_name(uint32_t friend_number){
+    static char *namebuf = NULL;
+    static uint32_t namebuf_size = 0;
+
+    size_t len = 1;
+    if (friend_number == SELF_FRIENDNUM) { // self
+        len += tox_self_get_name_size(tox);
+    } else {
+        TOX_ERR_FRIEND_QUERY err;
+        size_t namesz = tox_friend_get_name_size(tox, friend_number, &err);
+        if (err != TOX_ERR_FRIEND_QUERY_OK) {
+            ERROR("! `tox_friend_get_name_size` return err, errcode:%d", err);
+            namebuf[0] = '\0';
+            return namebuf;
+        }
+        len += namesz;
+    }
+    if (len > namebuf_size) {
+        namebuf = realloc(namebuf, len);
+        namebuf_size = len;
+    }
+    if (friend_number == SELF_FRIENDNUM) {
+        tox_self_get_name(tox, (uint8_t*)namebuf);
+    } else {
+        TOX_ERR_FRIEND_QUERY err;
+        if (!tox_friend_get_name(tox, friend_number, (uint8_t*)namebuf, &err)) {
+            ERROR("! `tox_friend_get_name` failed, errcode: %d", err)
+        }
+    } 
+    namebuf[len-1] = '\0';
+
+    return namebuf;
+}
+
 void create_tox()
 {
     struct Tox_Options options;
@@ -155,7 +217,7 @@ void create_tox()
         fclose(f);
 
         options.savedata_type = TOX_SAVEDATA_TYPE_TOX_SAVE;
-        options.savedata_data = savedata;
+        options.savedata_data = (uint8_t*)savedata;
         options.savedata_length = fsize;
 
         tox = tox_new(&options, NULL);
@@ -170,7 +232,7 @@ void update_savedata_file(const Tox *tox)
 {
     size_t size = tox_get_savedata_size(tox);
     char *savedata = malloc(size);
-    tox_get_savedata(tox, savedata);
+    tox_get_savedata(tox, (uint8_t*)savedata);
 
     FILE *f = fopen(savedata_tmp_filename, "wb");
     fwrite(savedata, size, 1, f);
@@ -217,23 +279,50 @@ void receipt_callback(Tox *tox, uint32_t friend_number, uint32_t message_id, voi
 void friend_message_cb(Tox *tox, uint32_t friend_number, TOX_MESSAGE_TYPE type, const uint8_t *message,
                                    size_t length, void *user_data)
 {
-    uint32_t m = tox_friend_send_message(tox, friend_number, type, message, length, NULL);
-    tox_callback_friend_read_receipt(tox, receipt_callback);
+    char *friend_name = get_name(friend_number);
+
+    if (friend_number == TalkingTo) {
+        if (type == TOX_MESSAGE_TYPE_NORMAL) {
+            PRINT(GUEST_TALK_PROMPT "%.*s", friend_name, (int)length, (char*)message);
+        } else {
+            INFO("* receive MESSAGE ACTION type");
+        }
+    } else {
+        INFO("* receive message from %s\n",friend_name);
+    }
+}
+
+void friend_connection_status_cb(Tox *tox, uint32_t friend_number, TOX_CONNECTION connection_status, void *user_data)
+{
+    char *name = get_name(friend_number);
+
+    switch (connection_status) {
+        case TOX_CONNECTION_NONE:
+            INFO("* %s is Offline", name);
+            break;
+        case TOX_CONNECTION_TCP:
+            INFO("* %s is Online(TCP)", name);
+            break;
+        case TOX_CONNECTION_UDP:
+            INFO("* %s is Online(UDP)", name);
+            break;
+    }
 }
 
 void self_connection_status_cb(Tox *tox, TOX_CONNECTION connection_status, void *user_data)
 {
     switch (connection_status) {
         case TOX_CONNECTION_NONE:
-            printf("Offline\n");
+            WARN("* you are Offline");
             break;
         case TOX_CONNECTION_TCP:
-            printf("Online, using TCP\n");
+            INFO("* you are Online(TCP)");
             break;
         case TOX_CONNECTION_UDP:
-            printf("Online, using UDP\n");
+            INFO("* you are Online(UDP)");
             break;
     }
+    tox_connection_status = connection_status;
 }
 
 uint8_t *hex_string_to_bin(const char *hex_string)
@@ -254,15 +343,9 @@ uint8_t *hex_string_to_bin(const char *hex_string)
     return ret;
 }
 
-int setup_tox()
+void setup_tox()
 {
     create_tox();
-
-    const char *name = "Echo Wang";
-    tox_self_set_name(tox, name, strlen(name), NULL);
-
-    const char *status_message = "继续不要停";
-    tox_self_set_status_message(tox, status_message, strlen(status_message), NULL);
 
     bootstrap(tox);
 
@@ -270,6 +353,7 @@ int setup_tox()
     tox_callback_friend_message(tox, friend_message_cb);
 
     tox_callback_self_connection_status(tox, self_connection_status_cb);
+    tox_callback_friend_connection_status(tox, friend_connection_status_cb);
 
     update_savedata_file(tox);
 }
@@ -300,101 +384,145 @@ void command_info_helper(int narg, char **args) {
         tox_id_hex[i] = toupper(tox_id_hex[i]);
     }
 
-    static uint8_t buf[256];
-    tox_self_get_name(tox, buf);
-    printf("Name:\t%s\n", buf);
-    printf("Tox ID:\t%s\n", tox_id_hex);
-    tox_self_get_status_message(tox, buf);
-    printf("Status:\t%s\n",buf);
+    char *name = get_name(SELF_FRIENDNUM);
+    PRINT("Name:\t%s", name);
+    PRINT("Tox ID:\t%s", tox_id_hex);
+
+    size_t sz = tox_self_get_status_message_size(tox);
+    char *status = calloc(1, sz);
+    tox_self_get_status_message(tox, (uint8_t*)status);
+    PRINT("Status:\t%s",status);
+    free(status);
+
+    const char * conn_st = "Offline";
+    if (tox_connection_status == TOX_CONNECTION_UDP) {
+        conn_st = "Online (UDP)";
+    } else if (tox_connection_status == TOX_CONNECTION_TCP) {
+        conn_st = "Online (TCP)";
+    }
+    PRINT("Network:\t%s",conn_st);
 }
 
 void command_setname_helper(int narg, char **args) {
     char *name = args[0];
-    tox_self_set_name(tox, name, strlen(name), NULL);
+    tox_self_set_name(tox, (uint8_t*)name, strlen(name), NULL);
 }
 
 void command_setstatus_helper(int narg, char **args) {
     char *status = args[0];
-    tox_self_set_status_message(tox, status, strlen(status), NULL);
+    tox_self_set_status_message(tox, (uint8_t*)status, strlen(status), NULL);
 }
 
 void command_add_helper(int narg, char **args) {
-    uint8_t *hex_id = args[0];
-    uint8_t *msg = "";
+    char *hex_id = args[0];
+    char *msg = "";
     if (narg > 1){
         msg = args[1];
     }
 
     uint8_t *bin_id = hex_string_to_bin(hex_id);
-    int num = tox_friend_add(tox, bin_id, msg, sizeof(msg), NULL);
+    tox_friend_add(tox, bin_id, (uint8_t*)msg, sizeof(msg), NULL);
 
-    printf("add friend ret:%d\n", num);
+    update_savedata_file(tox);
 
     free(bin_id);
+}
+
+void command_friends_helper(int narg, char **args) {
+    size_t sz = tox_self_get_friend_list_size(tox);
+    uint32_t *friend_list = malloc(sizeof(uint32_t) * sz);
+    tox_self_get_friend_list(tox, friend_list);
+    for (int i = 0;i<sz;i++) {
+        uint32_t friend_num = friend_list[i];
+        char *name = get_name(friend_num);
+
+        size_t status_sz = tox_friend_get_status_message_size(tox, friend_num, NULL);
+        char *status = calloc(1, status_sz+1);
+        tox_friend_get_status_message(tox, friend_num, (uint8_t*)status, NULL);
+
+        PRINT("%-3d%-20s%s",friend_num, name, status);
+
+        free(name);
+        free(status);
+    }
+    free(friend_list);
+}
+
+void command_save_helper(int narg, char **args) {
+    update_savedata_file(tox);
+}
+
+void command_go_helper(int narg, char **args) {
+    if (narg == 0) {
+        TalkingTo = SELF_FRIENDNUM;
+        strcpy(async_repl->prompt, CMD_PROMPT);
+        return;
+    }
+    uint32_t friend_num = (uint32_t)atoi(args[0]);
+    if (!tox_friend_exists(tox, friend_num)) {
+        ERROR("! friend not exist");
+        return;
+    }
+    TalkingTo = friend_num;
+    sprintf(async_repl->prompt, SELF_TALK_PROMPT, get_name(SELF_FRIENDNUM));
+    INFO("* talk to %s", get_name(friend_num));
 }
 
 #define COMMAND_ARGS_REST 100
 struct Command commands[] = {
     {
         "help",
-        "print this message.",
+        "- print this message.",
         0,
         command_help_helper,
     },
     {
         "info",
-        "show your info",
+        "- show your info",
         0,
         command_info_helper,
     },
     {
         "setname",
-        "set your name",
+        "<name> - set your name",
         1,
         command_setname_helper,
     },
     {
         "setstatus",
-        "set your status message.",
+        "<status_message> - set your status message.",
         1,
         command_setstatus_helper,
     },
     {
         "add",
-        "add friend",
+        "<toxid> [<msg>] - add friend",
         1 + COMMAND_ARGS_REST,
         command_add_helper,
+    },
+    {
+        "friends",
+        "- list your friends.",
+        0,
+        command_friends_helper,
+    },
+    {
+        "save",
+        "- save your data.",
+        0,
+        command_save_helper,
+    },
+    {
+        "go",
+        "[<friend_number>] - goto talk to someone if spcified <friend_number> or goto cmd mode.",
+        1,
+        command_go_helper,
     }
 };
 
 void command_help_helper(int narg, char **args){
     for (int i=0;i<sizeof(commands)/sizeof(struct Command);i++) {
-        printf("%-20s\t%s\n", commands[i].name, commands[i].desc);
-    }
-}
-
-#define REPL_BUF_SIZE  1024
-
-char replbuf[REPL_BUF_SIZE];
-int nread = 0;
-
-int readline(char *linebuf, int size){
-    while (1) {
-        ssize_t n = read(STDIN_FILENO, replbuf + nread, REPL_BUF_SIZE - nread);
-        if (n<=0){
-            return -1;
-        }
-        nread += n;
-        for (int i=nread-n; i<nread; i++){
-            if (replbuf[i] == '\n') {
-                i++;
-                memcpy(linebuf, replbuf, i);
-                nread -= i;
-                memmove(replbuf, replbuf+i, nread);
-                memset(replbuf+nread, 0, REPL_BUF_SIZE-nread);
-                return i;
-            }
-        }
+        PRINT("%-16s\t%s", commands[i].name, commands[i].desc);
     }
 }
 
@@ -410,13 +538,15 @@ int parseline(char *line,char **tokens) {
             }
             return n;
         }
-        if (line[i] == dem && tok_begin != NULL) {
-            tokens[n++] = tok_begin;
-            line[i] = '\0';
-        }
 
         if (line[i] != dem && tok_begin == NULL) {
             tok_begin = line + i;
+        }
+
+        if (line[i] == dem && tok_begin != NULL) {
+            tokens[n++] = tok_begin;
+            line[i] = '\0';
+            tok_begin = NULL;
         }
     }
 }
@@ -424,49 +554,67 @@ int parseline(char *line,char **tokens) {
 void repl_iterate(){
     static char buf[128];
     static char line[LINE_MAX_SIZE];
-    int n = read(STDIN_FILENO, buf, sizeof(buf));
-    if (n <= 0) {
-        return;
-    }
-    for (int i=0;i<n;i++) {
-        char c = buf[i];
-        if (c == '\004')          /* C-d */
-            return 0;
-        if (arepl_readline(async_repl, c, line, sizeof(line))) {
-            char *l = line;
-            l[strlen(l)-1] = '\0';
-            if (l[0] == '/') {
-                l++;
-                char **tokens[COMMAND_ARGS_REST];
-                int ntok = parseline(l, tokens);
-                for (int i=0;i<sizeof(commands)/sizeof(struct Command);i++){
-                    if (strcmp(commands[i].name, tokens[0]) == 0) {
-                        commands[i].handler(ntok-1, tokens+1);
-                        return;
+    while (1) {
+        int n = read(STDIN_FILENO, buf, sizeof(buf));
+        if (n <= 0) {
+            break;
+        }
+        for (int i=0;i<n;i++) {
+            char c = buf[i];
+            if (c == '\004')          /* C-d */
+                exit(0);
+            if (arepl_readline(async_repl, c, line, sizeof(line))) {
+                char *l = line;
+                l[strlen(l)-1] = '\0'; // remove trailing \n
+                if (l[0] == '/') {
+                    l++;
+                    char *tokens[COMMAND_ARGS_REST];
+                    int ntok = parseline(l, tokens);
+                    struct Command *cmd = NULL;
+                    for (int i=0;i<sizeof(commands)/sizeof(struct Command);i++){
+                        if (strcmp(commands[i].name, tokens[0]) == 0) {
+                            cmd = &commands[i];
+                            break;
+                        }
                     }
+                    if (cmd) {
+                        cmd->handler(ntok-1, tokens+1);
+                    } else {
+                        WARN("Invalid command: %s, try `/help` instead.", l);
+                    }
+                } else if (TalkingTo != SELF_FRIENDNUM) {
+                    tox_friend_send_message(tox, TalkingTo, TOX_MESSAGE_TYPE_NORMAL, (uint8_t*)l, strlen(l), NULL);
                 }
             }
-            printf("Invalid command: %s, try `/help` instead\n", buf);
         }
     }
+    arepl_reprint(async_repl);
 }
 
 void exit_cb() {
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &saved_tattr);
+    update_savedata_file(tox);
 }
 
 int main() {
-    INFO("setup tox ...\n");
+    INFO("setup tox ...");
+
+    setup_arepl();
     setup_tox();
 
     atexit(exit_cb);
 
+    uint32_t msecs = 0;
     while (1) {
-        repl_iterate();
+        if (msecs > 20) { // every 0.02 secs
+            msecs = 0;
+            repl_iterate();
+        }
         tox_iterate(tox, NULL);
-        usleep(tox_iteration_interval(tox) * 1000);
+        uint32_t v = tox_iteration_interval(tox);
+        msecs += v;
+        usleep(v * 1000);
     }
-    tox_kill(tox);
 
     return 0;
 }
