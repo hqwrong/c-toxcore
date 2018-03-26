@@ -477,6 +477,8 @@ void command_go_helper(int narg, char **args) {
 }
 
 #define COMMAND_ARGS_REST 100
+#define COMMAND_LENGTH (sizeof(commands)/sizeof(struct Command))
+
 struct Command commands[] = {
     {
         "help",
@@ -571,31 +573,31 @@ void repl_iterate(){
             char c = buf[i];
             if (c == '\004')          /* C-d */
                 exit(0);
-            if (arepl_readline(async_repl, c, line, sizeof(line))) {
-                char *l = line;
-                l[strlen(l)-1] = '\0'; // remove trailing \n
-                if (l[0] == '/') {
-                    l++;
-                    char *tokens[COMMAND_ARGS_REST];
-                    int ntok = parseline(l, tokens);
-                    struct Command *cmd = NULL;
-                    for (int i=0;i<sizeof(commands)/sizeof(struct Command);i++){
-                        if (strcmp(commands[i].name, tokens[0]) == 0) {
-                            cmd = &commands[i];
-                            break;
-                        }
+            if (!arepl_readline(async_repl, c, line, sizeof(line))) continue;
+
+            char *l = line;
+            l[strlen(l)-1] = '\0'; // remove trailing \n
+            if (l[0] == '/') {
+                l++;
+                char *tokens[COMMAND_ARGS_REST];
+                int ntok = parseline(l, tokens);
+                int j = 0;
+                for (;j<COMMAND_LENGTH;j++){
+                    if (strcmp(commands[j].name, tokens[0]) == 0) {
+                        commands[j].handler(ntok-1, tokens+1);
+                        break;
                     }
-                    if (cmd) {
-                        cmd->handler(ntok-1, tokens+1);
-                    } else {
-                        WARN("Invalid command: %s, try `/help` instead.", l);
-                    }
-                } else if (TalkingTo != SELF_FRIENDNUM) {
-                    tox_friend_send_message(tox, TalkingTo, TOX_MESSAGE_TYPE_NORMAL, (uint8_t*)l, strlen(l), NULL);
                 }
+                if (j != COMMAND_LENGTH) continue;
             }
-        }
-    }
+
+            if (TalkingTo != SELF_FRIENDNUM) {  // in cmd mode
+                tox_friend_send_message(tox, TalkingTo, TOX_MESSAGE_TYPE_NORMAL, (uint8_t*)l, strlen(l), NULL);
+            } else {
+                WARN("Invalid command: %s, try `/help` instead.", l);
+            }
+        } // end for
+    } // end while
 
     arepl_reprint(async_repl);
 }
