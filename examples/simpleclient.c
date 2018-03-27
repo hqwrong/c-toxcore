@@ -25,14 +25,24 @@ typedef struct DHT_node {
 } DHT_node;
 
 struct ChatHistory {
+    uint32_t friend_number;
+    char *msg;
+    struct ChatHistory *prev;
+    struct ChatHistory *next;
 };
 
 struct Friend {
+    uint32_t friend_number;
     char *name;
+    int name_sz;
     char *status_message;
+    int status_message_sz;
     TOX_CONNECTION connection;
     struct ChatHistory *hist;
 };
+
+struct Friend *friends = NULL;
+size_t friends_length = 0;
 
 // I assume normal friend_number will not get to this value, for code's simplicity. Plz do not do this in any serious client.
 #define SELF_FRIENDNUM ~((uint32_t)0) 
@@ -73,6 +83,12 @@ const char *savedata_tmp_filename = "savedata.tox.tmp";
 // Utils
 ////////////////////////////////
 
+#define RESIZE(key, size_key, length) \
+    if ((size_key) < (length + 1)) { \
+        size_key = (length+1);\
+        key = calloc(1, size_key);\
+    }
+
 char* getftime() {
     static char timebuf[64];
 
@@ -80,6 +96,46 @@ char* getftime() {
     struct tm *tm = localtime(&tt);
     strftime(timebuf, sizeof(timebuf), "%H:%M:%S", tm);
     return timebuf;
+}
+
+const char * connection_enum2text(TOX_CONNECTION conn) {
+    switch (conn) {
+        case TOX_CONNECTION_NONE:
+            return "Offline";
+        case TOX_CONNECTION_TCP:
+            return "Online(TCP)";
+        case TOX_CONNECTION_UDP:
+            return "Online(UDP)";
+        default:
+            return "UNKNOWN";
+    }
+}
+
+struct Friend *getfriend(uint32_t friend_number) {
+    for (int i=0;i<friends_length;i++) {
+        if (friends[i].friend_number == friend_number) {
+            return &friends[i];
+        }
+    }
+    return NULL;
+}
+
+uint8_t *hex_string_to_bin(const char *hex_string)
+{
+    // byte is represented by exactly 2 hex digits, so lenth of binary string
+    // is half of that of the hex one. only hex string with even length
+    // valid. the more proper implementation would be to check if strlen(hex_string)
+    // is odd and return error code if it is. we assume strlen is even. if it's not
+    // then the last byte just won't be written in 'ret'.
+    size_t i, len = strlen(hex_string) / 2;
+    uint8_t *ret = (uint8_t *)malloc(len);
+    const char *pos = hex_string;
+
+    for (i = 0; i < len; ++i, pos += 2) {
+        sscanf(pos, "%2hhx", &ret[i]);
+    }
+
+    return ret;
 }
 
 //////////////////////////
@@ -199,69 +255,6 @@ int arepl_readline(struct AsyncREPL *arepl, char c, char *line, size_t sz){
 // tox
 ////////////////////////
 
-char* get_name(uint32_t friend_number){
-    static char *namebuf = NULL;
-    static uint32_t namebuf_size = 0;
-
-    size_t len = 1;
-    if (friend_number == SELF_FRIENDNUM) { // self
-        len += tox_self_get_name_size(tox);
-    } else {
-        TOX_ERR_FRIEND_QUERY err;
-        size_t namesz = tox_friend_get_name_size(tox, friend_number, &err);
-        if (err != TOX_ERR_FRIEND_QUERY_OK) {
-            ERROR("! `tox_friend_get_name_size` return err, errcode:%d", err);
-            namebuf[0] = '\0';
-            return namebuf;
-        }
-        len += namesz;
-    }
-    if (len > namebuf_size) {
-        namebuf = realloc(namebuf, len);
-        namebuf_size = len;
-    }
-    if (friend_number == SELF_FRIENDNUM) {
-        tox_self_get_name(tox, (uint8_t*)namebuf);
-    } else {
-        TOX_ERR_FRIEND_QUERY err;
-        if (!tox_friend_get_name(tox, friend_number, (uint8_t*)namebuf, &err)) {
-            ERROR("! `tox_friend_get_name` failed, errcode: %d", err)
-        }
-    } 
-    namebuf[len-1] = '\0';
-
-    return namebuf;
-}
-
-void create_tox()
-{
-    struct Tox_Options options;
-
-    tox_options_default(&options);
-
-    FILE *f = fopen(savedata_filename, "rb");
-    if (f) {
-        fseek(f, 0, SEEK_END);
-        long fsize = ftell(f);
-        fseek(f, 0, SEEK_SET);
-
-        char *savedata = malloc(fsize);
-
-        fread(savedata, fsize, 1, f);
-        fclose(f);
-
-        options.savedata_type = TOX_SAVEDATA_TYPE_TOX_SAVE;
-        options.savedata_data = (uint8_t*)savedata;
-        options.savedata_length = fsize;
-
-        tox = tox_new(&options, NULL);
-
-        free(savedata);
-    } else {
-        tox = tox_new(&options, NULL);
-    }
-}
-
 void update_savedata_file(const Tox *tox)
 {
     size_t size = tox_get_savedata_size(tox);
@@ -313,78 +306,128 @@ void receipt_callback(Tox *tox, uint32_t friend_number, uint32_t message_id, voi
 void friend_message_cb(Tox *tox, uint32_t friend_number, TOX_MESSAGE_TYPE type, const uint8_t *message,
                                    size_t length, void *user_data)
 {
-    char *friend_name = get_name(friend_number);
+    struct Friend *f = getfriend(friend_number);
+    if (!f) return;
 
     if (friend_number == TalkingTo) {
         if (type == TOX_MESSAGE_TYPE_NORMAL) {
-            PRINT(GUEST_MSG_PREFIX "%.*s", getftime(), friend_name, (int)length, (char*)message);
+            PRINT(GUEST_MSG_PREFIX "%.*s", getftime(), f->name, (int)length, (char*)message);
         } else {
             INFO("* receive MESSAGE ACTION type");
         }
     } else {
-        INFO("* receive message from %s\n",friend_name);
+        INFO("* receive message from %s\n",f->name);
     }
 }
 
+
+void friend_name_cb(Tox *tox, uint32_t friend_number, const uint8_t *name, size_t length, void *user_data) {
+    struct Friend *f = getfriend(friend_number);
+
+    if (f) {
+        RESIZE(f->name, f->name_sz, length);
+        memcpy(f->name, name, length);
+    }
+}
+
+void friend_status_message_cb(Tox *tox, uint32_t friend_number, const uint8_t *message, size_t length, void *user_data) {
+    struct Friend *f = getfriend(friend_number);
+    if (f) {
+        RESIZE(f->status_message, f->status_message_sz, length);
+        memcpy(f->status_message, message, length);
+    }
+}
+
+
 void friend_connection_status_cb(Tox *tox, uint32_t friend_number, TOX_CONNECTION connection_status, void *user_data)
 {
-    char *name = get_name(friend_number);
-
-    switch (connection_status) {
-        case TOX_CONNECTION_NONE:
-            INFO("* %s is Offline", name);
-            break;
-        case TOX_CONNECTION_TCP:
-            INFO("* %s is Online(TCP)", name);
-            break;
-        case TOX_CONNECTION_UDP:
-            INFO("* %s is Online(UDP)", name);
-            break;
+    struct Friend *f = getfriend(friend_number);
+    if (f) {
+        f->connection = connection_status;
+        INFO("* %s is %s", f->name, connection_enum2text(connection_status));
     }
 }
 
 void self_connection_status_cb(Tox *tox, TOX_CONNECTION connection_status, void *user_data)
 {
-    switch (connection_status) {
-        case TOX_CONNECTION_NONE:
-            WARN("* you are Offline");
-            break;
-        case TOX_CONNECTION_TCP:
-            INFO("* you are Online(TCP)");
-            break;
-        case TOX_CONNECTION_UDP:
-            INFO("* you are Online(UDP)");
-            break;
-    }
-    tox_connection_status = connection_status;
+    struct Friend *f = friends;
+    f->connection = connection_status;
+    INFO("* You are %s", connection_enum2text(connection_status));
 }
 
-uint8_t *hex_string_to_bin(const char *hex_string)
+
+void create_tox()
 {
-    // byte is represented by exactly 2 hex digits, so lenth of binary string
-    // is half of that of the hex one. only hex string with even length
-    // valid. the more proper implementation would be to check if strlen(hex_string)
-    // is odd and return error code if it is. we assume strlen is even. if it's not
-    // then the last byte just won't be written in 'ret'.
-    size_t i, len = strlen(hex_string) / 2;
-    uint8_t *ret = (uint8_t *)malloc(len);
-    const char *pos = hex_string;
+    struct Tox_Options *options = tox_options_new(NULL);
 
-    for (i = 0; i < len; ++i, pos += 2) {
-        sscanf(pos, "%2hhx", &ret[i]);
+    FILE *f = fopen(savedata_filename, "rb");
+    if (f) {
+        fseek(f, 0, SEEK_END);
+        long fsize = ftell(f);
+        fseek(f, 0, SEEK_SET);
+
+        char *savedata = malloc(fsize);
+
+        fread(savedata, fsize, 1, f);
+        fclose(f);
+
+        tox_options_set_savedata_type(options, TOX_SAVEDATA_TYPE_TOX_SAVE);
+        tox_options_set_savedata_data(options, (uint8_t*)savedata, fsize);
+
+        tox = tox_new(options, NULL);
+
+        free(savedata);
+    } else {
+        tox = tox_new(options, NULL);
     }
+}
 
-    return ret;
+void init_friends() {
+    size_t sz = tox_self_get_friend_list_size(tox);
+    uint32_t *friend_list = malloc(sizeof(uint32_t) * sz);
+    tox_self_get_friend_list(tox, friend_list);
+
+    friends_length = sz + 1;
+    friends = calloc(friends_length, sizeof(struct Friend));
+
+    struct Friend *self = friends;
+    self->friend_number = SELF_FRIENDNUM;
+    self->name_sz = tox_self_get_name_size(tox) + 1;
+    self->name = calloc(1, self->name_sz);
+    tox_self_get_name(tox, (uint8_t*)self->name);
+
+    self->status_message_sz = tox_self_get_status_message_size(tox) + 1;
+    self->status_message = calloc(1, self->status_message_sz);
+    tox_self_get_status_message(tox, (uint8_t*)self->status_message);
+
+    for (int i = 0;i<sz;i++) {
+        struct Friend *f = friends + i + 1;
+        uint32_t friend_num = friend_list[i];
+        f->friend_number = friend_num;
+
+        f->name_sz = tox_friend_get_name_size(tox, friend_num, NULL) + 1;
+        f->name = calloc(1, f->name_sz);
+        tox_friend_get_name(tox, friend_num, (uint8_t*)f->name, NULL);
+
+        f->status_message_sz = tox_friend_get_status_message_size(tox, friend_num, NULL) + 1;
+        f->status_message = calloc(1, f->status_message_sz);
+        tox_friend_get_status_message(tox, friend_num, (uint8_t*)f->status_message, NULL);
+    }
+    free(friend_list);
 }
 
 void setup_tox()
 {
     create_tox();
 
+    init_friends();
+
     bootstrap(tox);
 
     tox_callback_friend_request(tox, friend_request_cb);
     tox_callback_friend_message(tox, friend_message_cb);
+    tox_callback_friend_name(tox, friend_name_cb);
+    tox_callback_friend_status_message(tox, friend_status_message_cb); 
 
     tox_callback_self_connection_status(tox, self_connection_status_cb);
     tox_callback_friend_connection_status(tox, friend_connection_status_cb);
@@ -418,8 +461,7 @@ void command_info_helper(int narg, char **args) {
         tox_id_hex[i] = toupper(tox_id_hex[i]);
     }
 
-    char *name = get_name(SELF_FRIENDNUM);
-    PRINT("Name:\t%s", name);
+    PRINT("Name:\t%s", friends->name);
     PRINT("Tox ID:\t%s", tox_id_hex);
 
     size_t sz = tox_self_get_status_message_size(tox);
@@ -439,12 +481,20 @@ void command_info_helper(int narg, char **args) {
 
 void command_setname_helper(int narg, char **args) {
     char *name = args[0];
+    size_t len = strlen(name);
     tox_self_set_name(tox, (uint8_t*)name, strlen(name), NULL);
+
+    RESIZE(friends->name, friends->name_sz, len);
+    memcpy(friends->name, name, len);
 }
 
 void command_setstatus_helper(int narg, char **args) {
     char *status = args[0];
+    size_t len = strlen(status);
     tox_self_set_status_message(tox, (uint8_t*)status, strlen(status), NULL);
+
+    RESIZE(friends->status_message, friends->status_message_sz, len);
+    memcpy(friends->status_message, status, len);
 }
 
 void command_add_helper(int narg, char **args) {
@@ -463,22 +513,10 @@ void command_add_helper(int narg, char **args) {
 }
 
 void command_friends_helper(int narg, char **args) {
-    size_t sz = tox_self_get_friend_list_size(tox);
-    uint32_t *friend_list = malloc(sizeof(uint32_t) * sz);
-    tox_self_get_friend_list(tox, friend_list);
-    for (int i = 0;i<sz;i++) {
-        uint32_t friend_num = friend_list[i];
-        char *name = get_name(friend_num);
-
-        size_t status_sz = tox_friend_get_status_message_size(tox, friend_num, NULL);
-        char *status = calloc(1, status_sz+1);
-        tox_friend_get_status_message(tox, friend_num, (uint8_t*)status, NULL);
-
-        PRINT("%-3d%-20s%s",friend_num, name, status);
-
-        free(status);
+    for (int i = 1; i < friends_length; i++) {
+        struct Friend *f = friends + i;
+        PRINT("%-3d %-15.15s %-12.12s %s",f->friend_number, f->name, connection_enum2text(f->connection), f->status_message);
     }
-    free(friend_list);
 }
 
 void command_save_helper(int narg, char **args) {
@@ -492,13 +530,14 @@ void command_go_helper(int narg, char **args) {
         return;
     }
     uint32_t friend_num = (uint32_t)atoi(args[0]);
-    if (!tox_friend_exists(tox, friend_num)) {
+    struct Friend *f = getfriend(friend_num);
+    if (!f) {
         ERROR("! friend not exist");
         return;
     }
     TalkingTo = friend_num;
-    sprintf(async_repl->prompt, TALK_PROMPT, get_name(friend_num));
-    INFO("* talk to %s", get_name(friend_num));
+    sprintf(async_repl->prompt, TALK_PROMPT, f->name);
+    INFO("* talk to %s", f->name);
 }
 
 #define COMMAND_ARGS_REST 100
@@ -607,7 +646,7 @@ void repl_iterate(){
             if (TalkingTo == SELF_FRIENDNUM) { // in cmd mode
                 PRINT(CMD_MSG_PREFIX "%.*s", len, l);
             } else { // in talk mode
-                PRINT(SELF_MSG_PREFIX "%.*s", getftime(), get_name(SELF_FRIENDNUM), len, l);
+                PRINT(SELF_MSG_PREFIX "%.*s", getftime(), friends->name, len, l);
             }
 
             if (l[0] == '/') {

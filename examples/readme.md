@@ -7,3 +7,15 @@
 5. group chat
 
 6. save friend's data(connection,name,status message)
+
+7. log
+
+8. Groupbot conn keeps changing
+
+
+
+---------------
+
+proposal:
+
+unify self and friend apis
