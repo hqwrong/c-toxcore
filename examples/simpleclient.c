@@ -643,12 +643,6 @@ void repl_iterate(){
             int len = strlen(l);
             l[--len] = '\0'; // remove trailing \n
 
-            if (TalkingTo == SELF_FRIENDNUM) { // in cmd mode
-                PRINT(CMD_MSG_PREFIX "%.*s", len, l);
-            } else { // in talk mode
-                PRINT(SELF_MSG_PREFIX "%.*s", getftime(), friends->name, len, l);
-            }
-
             if (l[0] == '/') {
                 l++;
                 char *tokens[COMMAND_ARGS_REST];
@@ -656,6 +650,7 @@ void repl_iterate(){
                 int j = 0;
                 for (;j<COMMAND_LENGTH;j++){
                     if (strcmp(commands[j].name, tokens[0]) == 0) {
+                        PRINT(CMD_MSG_PREFIX "%.*s", len, l);
                         commands[j].handler(ntok-1, tokens+1);
                         break;
                     }
@@ -664,6 +659,7 @@ void repl_iterate(){
             }
 
             if (TalkingTo != SELF_FRIENDNUM) {  // in talk mode
+                PRINT(SELF_MSG_PREFIX "%.*s", getftime(), friends->name, len, l);
                 tox_friend_send_message(tox, TalkingTo, TOX_MESSAGE_TYPE_NORMAL, (uint8_t*)l, strlen(l), NULL);
             } else {
                 WARN("Invalid command: %s, try `/help` instead.", l);
