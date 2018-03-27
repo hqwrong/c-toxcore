@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <termios.h>
 #include <unistd.h>
@@ -23,6 +24,16 @@ typedef struct DHT_node {
     unsigned char key_bin[TOX_PUBLIC_KEY_SIZE];
 } DHT_node;
 
+struct ChatHistory {
+};
+
+struct Friend {
+    char *name;
+    char *status_message;
+    TOX_CONNECTION connection;
+    struct ChatHistory *hist;
+};
+
 // I assume normal friend_number will not get to this value, for code's simplicity. Plz do not do this in any serious client.
 #define SELF_FRIENDNUM ~((uint32_t)0) 
 
@@ -36,16 +47,16 @@ const char *savedata_tmp_filename = "savedata.tox.tmp";
 #define CODE_ERASE_LINE    "\r\033[2K" 
 
 #define RESET_COLOR        "\x01b[0m"
-#define SELF_TALK_COLOR    "\x01b[32m"  // green
-// #define GUEST_TALK_COLOR   "\x01b[35m" // magenta
+#define SELF_TALK_COLOR    "\x01b[35m"  // magenta
 #define GUEST_TALK_COLOR   "\x01b[90m" // bright black
-#define CMD_PROMPT_COLOR   "\x01b[32m" // green
+#define CMD_PROMPT_COLOR   "\x01b[34m" // blue
 
 #define CMD_PROMPT   CMD_PROMPT_COLOR "> " RESET_COLOR // green
-#define GUEST_TALK_PROMPT  GUEST_TALK_COLOR "%12.12s | " RESET_COLOR
-#define SELF_TALK_PROMPT   SELF_TALK_COLOR "%12.12s | " RESET_COLOR
+#define TALK_PROMPT  CMD_PROMPT_COLOR ">> %-.12s : " RESET_COLOR
 
-#define TALK_PROMPT_TIME_FORMAT  "hh:mm:ss"  // comment this line to disable display time
+#define GUEST_MSG_PREFIX  GUEST_TALK_COLOR "%s  %12.12s | " RESET_COLOR
+#define SELF_MSG_PREFIX  SELF_TALK_COLOR "%s  %12.12s | " RESET_COLOR
+#define CMD_MSG_PREFIX  CMD_PROMPT
 
 #define PRINT(_fmt, ...) \
     fputs(CODE_ERASE_LINE,stdout);\
@@ -57,6 +68,19 @@ const char *savedata_tmp_filename = "savedata.tox.tmp";
 #define WARN(_fmt,...) COLOR_PRINT("\x01b[33m", _fmt, ##__VA_ARGS__) // yellow
 #define ERROR(_fmt,...) COLOR_PRINT("\x01b[31m", _fmt, ##__VA_ARGS__) // red
 
+
+///////////////////////////////
+// Utils
+////////////////////////////////
+
+char* getftime() {
+    static char timebuf[64];
+
+    time_t tt = time(NULL);
+    struct tm *tm = localtime(&tt);
+    strftime(timebuf, sizeof(timebuf), "%H:%M:%S", tm);
+    return timebuf;
+}
 
 //////////////////////////
 // Async REPL
@@ -122,12 +146,12 @@ int arepl_readline(struct AsyncREPL *arepl, char c, char *line, size_t sz){
     if (escaped>0) escaped++;
 
     switch (c) {
-        case '\n':
-            putchar('\n'); // open a new line
+        case '\n': {
             int ret = snprintf(line, sz, "%.*s%.*s\n",(int)arepl->nbuf, arepl->line, (int)arepl->nstack, arepl->line + arepl->sz - arepl->nstack);
             arepl->nbuf = 0;
             arepl->nstack = 0;
             return ret;
+        }
 
         case '\010':  // C-h
         case '\177':  // Backspace
@@ -293,7 +317,7 @@ void friend_message_cb(Tox *tox, uint32_t friend_number, TOX_MESSAGE_TYPE type, 
 
     if (friend_number == TalkingTo) {
         if (type == TOX_MESSAGE_TYPE_NORMAL) {
-            PRINT(GUEST_TALK_PROMPT "%.*s", friend_name, (int)length, (char*)message);
+            PRINT(GUEST_MSG_PREFIX "%.*s", getftime(), friend_name, (int)length, (char*)message);
         } else {
             INFO("* receive MESSAGE ACTION type");
         }
@@ -473,7 +497,7 @@ void command_go_helper(int narg, char **args) {
         return;
     }
     TalkingTo = friend_num;
-    sprintf(async_repl->prompt, SELF_TALK_PROMPT, get_name(SELF_FRIENDNUM));
+    sprintf(async_repl->prompt, TALK_PROMPT, get_name(friend_num));
     INFO("* talk to %s", get_name(friend_num));
 }
 
@@ -577,7 +601,15 @@ void repl_iterate(){
             if (!arepl_readline(async_repl, c, line, sizeof(line))) continue;
 
             char *l = line;
-            l[strlen(l)-1] = '\0'; // remove trailing \n
+            int len = strlen(l);
+            l[--len] = '\0'; // remove trailing \n
+
+            if (TalkingTo == SELF_FRIENDNUM) { // in cmd mode
+                PRINT(CMD_MSG_PREFIX "%.*s", len, l);
+            } else { // in talk mode
+                PRINT(SELF_MSG_PREFIX "%.*s", getftime(), get_name(SELF_FRIENDNUM), len, l);
+            }
+
             if (l[0] == '/') {
                 l++;
                 char *tokens[COMMAND_ARGS_REST];
@@ -592,14 +624,13 @@ void repl_iterate(){
                 if (j != COMMAND_LENGTH) continue;
             }
 
-            if (TalkingTo != SELF_FRIENDNUM) {  // in cmd mode
+            if (TalkingTo != SELF_FRIENDNUM) {  // in talk mode
                 tox_friend_send_message(tox, TalkingTo, TOX_MESSAGE_TYPE_NORMAL, (uint8_t*)l, strlen(l), NULL);
             } else {
                 WARN("Invalid command: %s, try `/help` instead.", l);
             }
         } // end for
     } // end while
-
     arepl_reprint(async_repl);
 }
 
