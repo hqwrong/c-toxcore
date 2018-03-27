@@ -639,18 +639,16 @@ void repl_iterate(){
                 exit(0);
             if (!arepl_readline(async_repl, c, line, sizeof(line))) continue;
 
-            char *l = line;
-            int len = strlen(l);
-            l[--len] = '\0'; // remove trailing \n
+            int len = strlen(line);
+            line[--len] = '\0'; // remove trailing \n
 
-            if (l[0] == '/') {
-                l++;
+            if (line[0] == '/') {
                 char *tokens[COMMAND_ARGS_REST];
-                int ntok = parseline(l, tokens);
+                int ntok = parseline(line+1, tokens); // skip leading '/'
                 int j = 0;
                 for (;j<COMMAND_LENGTH;j++){
                     if (strcmp(commands[j].name, tokens[0]) == 0) {
-                        PRINT(CMD_MSG_PREFIX "%.*s", len, l);
+                        PRINT(CMD_MSG_PREFIX "%.*s", len, line);
                         commands[j].handler(ntok-1, tokens+1);
                         break;
                     }
@@ -659,10 +657,10 @@ void repl_iterate(){
             }
 
             if (TalkingTo != SELF_FRIENDNUM) {  // in talk mode
-                PRINT(SELF_MSG_PREFIX "%.*s", getftime(), friends->name, len, l);
-                tox_friend_send_message(tox, TalkingTo, TOX_MESSAGE_TYPE_NORMAL, (uint8_t*)l, strlen(l), NULL);
+                PRINT(SELF_MSG_PREFIX "%.*s", getftime(), friends->name, len, line);
+                tox_friend_send_message(tox, TalkingTo, TOX_MESSAGE_TYPE_NORMAL, (uint8_t*)line, strlen(line), NULL);
             } else {
-                WARN("Invalid command: %s, try `/help` instead.", l);
+                WARN("Invalid command: %s, try `/help` instead.", line);
             }
         } // end for
     } // end while
