@@ -1,3 +1,5 @@
+1. bugfix: print line
+
 2. notify message send failed;
 
 3. accept friend add request && notify friend accept/decline

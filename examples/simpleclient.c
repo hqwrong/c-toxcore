@@ -24,6 +24,15 @@ typedef struct DHT_node {
     unsigned char key_bin[TOX_PUBLIC_KEY_SIZE];
 } DHT_node;
 
+struct Request {
+    char *msg;
+    uint8_t pubkey[TOX_PUBLIC_KEY_SIZE];
+    uint32_t id;
+    struct Request *next;
+};
+
+struct Request *friend_requests = NULL;
+
 struct ChatHistory {
     uint32_t friend_number;
     char *msg;
@@ -39,10 +48,13 @@ struct Friend {
     int status_message_sz;
     TOX_CONNECTION connection;
     struct ChatHistory *hist;
+
+    struct Friend *next;
 };
 
 struct Friend *friends = NULL;
-size_t friends_length = 0;
+
+struct Friend self;
 
 // I assume normal friend_number will not get to this value, for code's simplicity. Plz do not do this in any serious client.
 #define SELF_FRIENDNUM ~((uint32_t)0) 
@@ -89,6 +101,13 @@ const char *savedata_tmp_filename = "savedata.tox.tmp";
         key = calloc(1, size_key);\
     }
 
+#define LIST_FIND(_p, _condition) \
+    for (;*(_p) != NULL;_p = &((*_p)->next)) { \
+        if (_condition) { \
+            break;\
+        }\
+    }\
+
 char* getftime() {
     static char timebuf[64];
 
@@ -112,12 +131,32 @@ const char * connection_enum2text(TOX_CONNECTION conn) {
 }
 
 struct Friend *getfriend(uint32_t friend_number) {
-    for (int i=0;i<friends_length;i++) {
-        if (friends[i].friend_number == friend_number) {
-            return &friends[i];
-        }
+    struct Friend **p = &friends;
+    LIST_FIND(p, (*p)->friend_number == friend_number);
+    return *p;
+}
+
+struct Friend *addfriend(uint32_t friend_number) {
+    struct Friend *f = calloc(1, sizeof(struct Friend));
+    f->next = friends;
+    friends = f;
+    f->friend_number = friend_number;
+    f->connection = TOX_CONNECTION_NONE;
+    return f;
+}
+
+bool delfriend(uint32_t friend_number) {
+    struct Friend **p = &friends;
+    LIST_FIND(p, (*p)->friend_number == friend_number);
+    struct Friend *f = *p;
+    if (f) {
+        *p = f->next;
+        if (f->name) free(f->name);
+        if (f->status_message) free(f->status_message);
+        free(f);
+        return 1;
     }
-    return NULL;
+    return 0;
 }
 
 uint8_t *hex_string_to_bin(const char *hex_string)
@@ -136,6 +175,18 @@ uint8_t *hex_string_to_bin(const char *hex_string)
     }
 
     return ret;
+}
+
+char *bin2hex(const uint8_t *bin, size_t length) {
+    size_t hexlen = 2*length + 1;
+    char *hex = malloc(hexlen);
+    sodium_bin2hex(hex, hexlen, bin, length);
+
+    for (size_t i = 0; i < hexlen-1; i++) {
+        hex[i] = toupper(hex[i]);
+    }
+
+    return hex;
 }
 
 //////////////////////////
@@ -294,9 +345,17 @@ void bootstrap(Tox *tox)
 void friend_request_cb(Tox *tox, const uint8_t *public_key, const uint8_t *message, size_t length,
                                    void *user_data)
 {
-    tox_friend_add_norequest(tox, public_key, NULL);
+    INFO("* A friend request comes(use `/accept` to see)");
 
-    update_savedata_file(tox);
+    struct Request *req = malloc(sizeof(struct Request));
+    req->msg = malloc(length + 1);
+    sprintf(req->msg, "%.*s", (int)length, (char*)message);
+    memcpy(req->pubkey, public_key, TOX_PUBLIC_KEY_SIZE);
+
+    req->id = 1 + ((friend_requests != NULL) ? friend_requests->id : 0);
+
+    req->next = friend_requests;
+    friend_requests = req;
 }
 
 void receipt_callback(Tox *tox, uint32_t friend_number, uint32_t message_id, void *user_data) {
@@ -350,8 +409,7 @@ void friend_connection_status_cb(Tox *tox, uint32_t friend_number, TOX_CONNECTIO
 
 void self_connection_status_cb(Tox *tox, TOX_CONNECTION connection_status, void *user_data)
 {
-    struct Friend *f = friends;
-    f->connection = connection_status;
+    self.connection = connection_status;
     INFO("* You are %s", connection_enum2text(connection_status));
 }
 
@@ -387,23 +445,9 @@ void init_friends() {
     uint32_t *friend_list = malloc(sizeof(uint32_t) * sz);
     tox_self_get_friend_list(tox, friend_list);
 
-    friends_length = sz + 1;
-    friends = calloc(friends_length, sizeof(struct Friend));
-
-    struct Friend *self = friends;
-    self->friend_number = SELF_FRIENDNUM;
-    self->name_sz = tox_self_get_name_size(tox) + 1;
-    self->name = calloc(1, self->name_sz);
-    tox_self_get_name(tox, (uint8_t*)self->name);
-
-    self->status_message_sz = tox_self_get_status_message_size(tox) + 1;
-    self->status_message = calloc(1, self->status_message_sz);
-    tox_self_get_status_message(tox, (uint8_t*)self->status_message);
-
     for (int i = 0;i<sz;i++) {
-        struct Friend *f = friends + i + 1;
         uint32_t friend_num = friend_list[i];
-        f->friend_number = friend_num;
+        struct Friend *f = addfriend(friend_num);
 
         f->name_sz = tox_friend_get_name_size(tox, friend_num, NULL) + 1;
         f->name = calloc(1, f->name_sz);
@@ -412,8 +456,19 @@ void init_friends() {
         f->status_message_sz = tox_friend_get_status_message_size(tox, friend_num, NULL) + 1;
         f->status_message = calloc(1, f->status_message_sz);
         tox_friend_get_status_message(tox, friend_num, (uint8_t*)f->status_message, NULL);
+
     }
     free(friend_list);
+
+    // add self
+    self.friend_number = SELF_FRIENDNUM;
+    self.name_sz = tox_self_get_name_size(tox) + 1;
+    self.name = calloc(1, self.name_sz);
+    tox_self_get_name(tox, (uint8_t*)self.name);
+
+    self.status_message_sz = tox_self_get_status_message_size(tox) + 1;
+    self.status_message = calloc(1, self.status_message_sz);
+    tox_self_get_status_message(tox, (uint8_t*)self.status_message);
 }
 
 void setup_tox()
@@ -450,19 +505,14 @@ struct Command {
 void command_help_helper(int narg, char **args);
 
 void command_info_helper(int narg, char **args) {
+    PRINT("Name:\t%s", self.name);
+
     uint32_t addr_size = tox_address_size();
     uint8_t tox_id_bin[addr_size];
     tox_self_get_address(tox, tox_id_bin);
-
-    char tox_id_hex[addr_size*2 + 1];
-    sodium_bin2hex(tox_id_hex, sizeof(tox_id_hex), tox_id_bin, sizeof(tox_id_bin));
-
-    for (size_t i = 0; i < sizeof(tox_id_hex)-1; i ++) {
-        tox_id_hex[i] = toupper(tox_id_hex[i]);
-    }
-
-    PRINT("Name:\t%s", friends->name);
-    PRINT("Tox ID:\t%s", tox_id_hex);
+    char *hex = bin2hex(tox_id_bin, sizeof(tox_id_bin));
+    PRINT("Tox ID:\t%s", hex);
+    free(hex);
 
     size_t sz = tox_self_get_status_message_size(tox);
     char *status = calloc(1, sz);
@@ -484,8 +534,8 @@ void command_setname_helper(int narg, char **args) {
     size_t len = strlen(name);
     tox_self_set_name(tox, (uint8_t*)name, strlen(name), NULL);
 
-    RESIZE(friends->name, friends->name_sz, len);
-    memcpy(friends->name, name, len);
+    RESIZE(self.name, self.name_sz, len);
+    memcpy(self.name, name, len);
 }
 
 void command_setstatus_helper(int narg, char **args) {
@@ -493,8 +543,8 @@ void command_setstatus_helper(int narg, char **args) {
     size_t len = strlen(status);
     tox_self_set_status_message(tox, (uint8_t*)status, strlen(status), NULL);
 
-    RESIZE(friends->status_message, friends->status_message_sz, len);
-    memcpy(friends->status_message, status, len);
+    RESIZE(self.status_message, self.status_message_sz, len);
+    memcpy(self.status_message, status, len);
 }
 
 void command_add_helper(int narg, char **args) {
@@ -505,16 +555,24 @@ void command_add_helper(int narg, char **args) {
     }
 
     uint8_t *bin_id = hex_string_to_bin(hex_id);
-    tox_friend_add(tox, bin_id, (uint8_t*)msg, sizeof(msg), NULL);
-
-    update_savedata_file(tox);
-
+    uint32_t friend_number = tox_friend_add(tox, bin_id, (uint8_t*)msg, sizeof(msg), NULL);
     free(bin_id);
+
+    addfriend(friend_number);
+}
+
+void command_del_helper(int narg, char **args) {
+    uint32_t friend_number = (uint32_t)atoi(args[0]);
+    if (delfriend(friend_number)) {
+        tox_friend_delete(tox, friend_number, NULL);
+    } else {
+        ERROR("! friend not exist");
+    }
 }
 
 void command_friends_helper(int narg, char **args) {
-    for (int i = 1; i < friends_length; i++) {
-        struct Friend *f = friends + i;
+    struct Friend *f = friends;
+    for (;f != NULL; f = f->next) {
         PRINT("%-3d %-15.15s %-12.12s %s",f->friend_number, f->name, connection_enum2text(f->connection), f->status_message);
     }
 }
@@ -538,6 +596,42 @@ void command_go_helper(int narg, char **args) {
     TalkingTo = friend_num;
     sprintf(async_repl->prompt, TALK_PROMPT, f->name);
     INFO("* talk to %s", f->name);
+}
+
+void _command_accept(int narg, char **args, bool is_accept) {
+    if (narg == 0) {
+        struct Request * req = friend_requests;
+        PRINT("Friend Requests:");
+        for (;req != NULL;req=req->next) {
+            char *hex = bin2hex(req->pubkey, TOX_PUBLIC_KEY_SIZE);
+            PRINT("    %-8d%-.8s   %s", req->id, hex, req->msg);
+            free(hex);
+        }
+    } else {
+        uint32_t accept_num = (uint32_t)atoi(args[0]);
+        struct Request **p = &friend_requests;
+        LIST_FIND(p, (*p)->id == accept_num);
+        struct Request *req = *p;
+        if (req) {
+            *p = req->next;
+            if (is_accept) {
+                uint32_t friend_num = tox_friend_add_norequest(tox, req->pubkey, NULL);
+                addfriend(friend_num);
+            }
+            free(req->msg);
+            free(req);
+        } else {
+            ERROR("! Invalid request_number");
+        }
+    }
+}
+
+void command_accept_helper(int narg, char **args) {
+    _command_accept(narg, args, 1);
+}
+
+void command_deny_helper(int narg, char **args) {
+    _command_accept(narg, args, 0);
 }
 
 #define COMMAND_ARGS_REST 100
@@ -575,6 +669,12 @@ struct Command commands[] = {
         command_add_helper,
     },
     {
+        "del",
+        "<friend_number> - del a friend.",
+        1,
+        command_del_helper,
+    },
+    {
         "friends",
         "- list your friends.",
         0,
@@ -591,7 +691,19 @@ struct Command commands[] = {
         "[<friend_number>] - goto talk to someone if spcified <friend_number> or goto cmd mode.",
         1,
         command_go_helper,
-    }
+    },
+    {
+        "accept",
+        "[<request_number>] - list friend requests or conference invites.",
+        0 + COMMAND_ARGS_REST,
+        command_accept_helper,
+    },
+    {
+        "deny",
+        "[<request_number>] - list friend requests or conference invites.",
+        0 + COMMAND_ARGS_REST,
+        command_accept_helper,
+    },
 };
 
 void command_help_helper(int narg, char **args){
