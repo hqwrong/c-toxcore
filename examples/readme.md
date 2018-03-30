@@ -1,18 +1,23 @@
-1. bugfix: print line
+1. bugfix: print cmd
 
 2. notify message send failed;
 
-3. accept friend add request && notify friend accept/decline
-
-4. split cmd args
+4. split cmd args && treat '\\'
 
 5. group chat
 
-6. save friend's data(connection,name,status message)
+6. chat history
 
 7. log
 
-8. Groupbot conn keeps changing
+8. unrely sodium/utils.h
+
+9. change prompt dynamically when title/name changed
+
+--------------------
+bug:
+
+Groupbot conn keeps changing
 
 
 
