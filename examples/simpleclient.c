@@ -10,7 +10,6 @@
 #include <unistd.h>
 #include <fcntl.h>
 
-#include <sodium/utils.h>
 #include <tox.h>
 
 Tox *tox;
@@ -208,34 +207,25 @@ struct Conference *getconfer(uint32_t conference_number) {
 }
 
 
-uint8_t *hex_string_to_bin(const char *hex_string)
+uint8_t *hex2bin(const char *hex)
 {
-    // byte is represented by exactly 2 hex digits, so lenth of binary string
-    // is half of that of the hex one. only hex string with even length
-    // valid. the more proper implementation would be to check if strlen(hex_string)
-    // is odd and return error code if it is. we assume strlen is even. if it's not
-    // then the last byte just won't be written in 'ret'.
-    size_t i, len = strlen(hex_string) / 2;
-    uint8_t *ret = (uint8_t *)malloc(len);
-    const char *pos = hex_string;
+    size_t len = strlen(hex) / 2;
+    uint8_t *bin = malloc(len);
 
-    for (i = 0; i < len; ++i, pos += 2) {
-        sscanf(pos, "%2hhx", &ret[i]);
+    for (size_t i = 0; i < len; ++i, hex += 2) {
+        sscanf(hex, "%2hhx", &ret[i]);
     }
 
-    return ret;
+    return bin;
 }
 
 char *bin2hex(const uint8_t *bin, size_t length) {
-    size_t hexlen = 2*length + 1;
-    char *hex = malloc(hexlen);
-    sodium_bin2hex(hex, hexlen, bin, length);
-
-    for (size_t i = 0; i < hexlen-1; i++) {
-        hex[i] = toupper(hex[i]);
+    char *hex = malloc(2*length + 1);
+    char *saved = hex;
+    for (int i=0; i<length;i++,hex+=2) {
+        sprintf(hex, "%02X",bin[i]);
     }
-
-    return hex;
+    return saved;
 }
 
 //////////////////////////
@@ -340,8 +330,8 @@ int arepl_readline(struct AsyncREPL *arepl, char c, char *line, size_t sz){
         case 'C':
             if (escaped == 3 && arepl->nbuf >= 1 && arepl->line[arepl->nbuf-1] == '[') { // arrow keys
                 arepl->nbuf--;
-                if (c == 'D' && arepl->nbuf > 0) _AREPL_CURSOR_LEFT(); // left arrow
-                if (c == 'C' && arepl->nstack > 0) _AREPL_CURSOR_RIGHT(); // right arrow
+                if (c == 'D' && arepl->nbuf > 0) _AREPL_CURSOR_LEFT(); // left arrow: \033[D
+                if (c == 'C' && arepl->nstack > 0) _AREPL_CURSOR_RIGHT(); // right arrow: \033[C
                 break;
             }
             // fall through to default case
@@ -615,7 +605,7 @@ void command_setname_helper(int narg, char **args) {
     tox_self_set_name(tox, (uint8_t*)name, strlen(name), NULL);
 
     RESIZE(self.name, self.name_sz, len);
-    memcpy(self.name, name, len);
+    sprintf(self.name, "%.*s", (int)len, name);
 }
 
 void command_setstatus_helper(int narg, char **args) {
@@ -634,7 +624,7 @@ void command_add_helper(int narg, char **args) {
         msg = args[1];
     }
 
-    uint8_t *bin_id = hex_string_to_bin(hex_id);
+    uint8_t *bin_id = hex2bin(hex_id);
     uint32_t friend_number = tox_friend_add(tox, bin_id, (uint8_t*)msg, sizeof(msg), NULL);
     free(bin_id);
 
@@ -810,29 +800,15 @@ void command_help_helper(int narg, char **args){
     }
 }
 
-// caller makes sure args doesn't overflow
-int parseline(char *line,char **tokens) {
-    char dem = ' ';
-    char *tok_begin = NULL;
-    int n = 0;
-    for (int i = 0;;i++) {
-        if (line[i] == '\0'){
-            if (tok_begin != NULL) {
-                tokens[n++] = tok_begin;
-            }
-            return n;
-        }
+char *poptok(char **strp) {
+    static const char *dem = " \t";
+    char *save = *strp;
+    *strp = strpbrk(*strp, dem);
+    if (*strp == NULL) return save;
 
-        if (line[i] != dem && tok_begin == NULL) {
-            tok_begin = line + i;
-        }
-
-        if (line[i] == dem && tok_begin != NULL) {
-            tokens[n++] = tok_begin;
-            line[i] = '\0';
-            tok_begin = NULL;
-        }
-    }
+    *((*strp)++) = '\0';
+    *strp += strspn(*strp,dem);
+    return save;
 }
 
 void repl_iterate(){
@@ -843,36 +819,52 @@ void repl_iterate(){
         if (n <= 0) {
             break;
         }
-        for (int i=0;i<n;i++) {
+        for (int i=0;i<n;i++) { // for_1
             char c = buf[i];
             if (c == '\004')          /* C-d */
                 exit(0);
-            if (!arepl_readline(async_repl, c, line, sizeof(line))) continue;
+            if (!arepl_readline(async_repl, c, line, sizeof(line))) continue; // continue to for_1
 
             int len = strlen(line);
             line[--len] = '\0'; // remove trailing \n
 
-            if (line[0] == '/') {
-                char *tokens[COMMAND_ARGS_REST];
-                int ntok = parseline(line+1, tokens); // skip leading '/'
-                int j = 0;
-                for (;j<COMMAND_LENGTH;j++){
-                    if (strcmp(commands[j].name, tokens[0]) == 0) {
-                        PRINT(CMD_MSG_PREFIX "%.*s", len, line);
-                        commands[j].handler(ntok-1, tokens+1);
-                        break;
-                    }
-                }
-                if (j != COMMAND_LENGTH) continue;
-            }
-
-            if (TalkingTo != SELF_FRIENDNUM) {  // in talk mode
+            if (TalkingTo != SELF_FRIENDNUM && line[0] != '/') {  // if talking to someone, just print the msg out.
                 PRINT(SELF_MSG_PREFIX "%.*s", getftime(), self.name, len, line);
                 tox_friend_send_message(tox, TalkingTo, TOX_MESSAGE_TYPE_NORMAL, (uint8_t*)line, strlen(line), NULL);
-            } else {
-                WARN("Invalid command: %s, try `/help` instead.", line);
+                continue; // continue to for_1
             }
-        } // end for
+
+            PRINT(CMD_MSG_PREFIX "%s", line);
+
+            if (line[0] == '/') {
+                char *l = line + 1; // skip '/'
+                char *cmdname = poptok(&l);
+                struct Command *cmd = NULL;
+                for (int j=0; j<COMMAND_LENGTH;j++){ // for_2
+                    if (strcmp(commands[j].name, cmdname) == 0) {
+                        cmd = &commands[j];
+                        break; // break for_2
+                    }
+                }
+                if (cmd) {
+                    char *tokens[cmd->narg];
+                    int ntok = 0;
+                    for (; l != NULL && ntok != cmd->narg; ntok++) {  
+                        // if it's the last arg, then take the rest line.
+                        char *tok = (ntok == cmd->narg - 1) ? l : poptok(&l);
+                        tokens[ntok] = tok;
+                    }
+                    if (ntok < cmd->narg - (cmd->narg >= COMMAND_ARGS_REST ? COMMAND_ARGS_REST : 0)) {
+                        ERROR("! wrong number of cmd args");
+                    } else {
+                        cmd->handler(ntok, tokens);
+                    }
+                    continue; // continue to for_1
+                }
+            }
+
+            WARN("Invalid command, try `/help` instead.");
+        } // end for_1
     } // end while
     arepl_reprint(async_repl);
 }
