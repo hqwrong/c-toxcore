@@ -18,7 +18,7 @@ typedef struct DHT_node {
     const char *ip;
     uint16_t port;
     const char key_hex[TOX_PUBLIC_KEY_SIZE*2 + 1];
-    unsigned char key_bin[TOX_PUBLIC_KEY_SIZE];
+    uint8_t *key_bin;
 } DHT_node;
 
 struct ConferenceUserData {
@@ -52,18 +52,10 @@ struct ChatHistory {
     struct ChatHistory *next;
 };
 
-struct ConferencePeer {
-    char *name;
-    char pubkey_hex[TOX_PUBLIC_KEY_SIZE * 2 +1];
-    struct ConferencePeer *next;
-};
-
 struct Conference {
     uint32_t conference_number;
     char *title;
     size_t title_sz;
-    uint32_t peer_count;
-    struct ConferencePeer *peers;
 
     struct Conference *next;
 };
@@ -87,9 +79,9 @@ struct Friend self;
 struct Conference *conferences = NULL;
 
 // I assume normal friend_number will not get to this value, for code's simplicity. Plz do not do this in any serious client.
-#define SELF_FRIENDNUM UINT32_MAX
+enum TALK_TYPE { TALK_TYPE_FRIEND, TALK_TYPE_CONFERENCE, TALK_TYPE_COUNT, TALK_TYPE_NULL = UINT32_MAX };
 
-uint32_t TalkingTo = SELF_FRIENDNUM;
+uint32_t TalkingTo = TALK_TYPE_NULL;
 
 const char *savedata_filename = "savedata.tox";
 const char *savedata_tmp_filename = "savedata.tox.tmp";
@@ -104,7 +96,8 @@ const char *savedata_tmp_filename = "savedata.tox.tmp";
 #define CMD_PROMPT_COLOR   "\x01b[34m" // blue
 
 #define CMD_PROMPT   CMD_PROMPT_COLOR "> " RESET_COLOR // green
-#define TALK_PROMPT  CMD_PROMPT_COLOR ">> %-.12s : " RESET_COLOR
+#define FRIEND_TALK_PROMPT  CMD_PROMPT_COLOR ">> %-.12s : " RESET_COLOR
+#define CONFERENCE_TALK_PROMPT  CMD_PROMPT_COLOR ">>> %-.12s : " RESET_COLOR
 
 #define GUEST_MSG_PREFIX  GUEST_TALK_COLOR "%s  %12.12s | " RESET_COLOR
 #define SELF_MSG_PREFIX  SELF_TALK_COLOR "%s  %12.12s | " RESET_COLOR
@@ -206,6 +199,16 @@ struct Conference *getconfer(uint32_t conference_number) {
     return *p;
 }
 
+char *get_confer_peername(uint32_t conference_number, uint32_t peer_number) {
+    static char *peername = NULL;
+    if (!peername) peername = malloc(tox_max_name_length() + 1);
+    TOX_ERR_CONFERENCE_PEER_QUERY err;
+    size_t sz = tox_conference_peer_get_name_size(tox, conference_number, peer_number, &err);
+    if (err == TOX_ERR_CONFERENCE_PEER_QUERY_OK) return NULL;
+    tox_conference_peer_get_name(tox, conference_number, peer_number, (uint8_t*)peername, NULL);
+    peername[sz] = '\0';
+    return peername;
+}
 
 uint8_t *hex2bin(const char *hex)
 {
@@ -213,7 +216,7 @@ uint8_t *hex2bin(const char *hex)
     uint8_t *bin = malloc(len);
 
     for (size_t i = 0; i < len; ++i, hex += 2) {
-        sscanf(hex, "%2hhx", &ret[i]);
+        sscanf(hex, "%2hhx", &bin[i]);
     }
 
     return bin;
@@ -364,19 +367,18 @@ void bootstrap(Tox *tox)
 {
     DHT_node nodes[] =
     {
-        {"178.62.250.138",             33445, "788236D34978D1D5BD822F0A5BEBD2C53C64CC31CD3149350EE27D4D9A2F9B6B", {0}},
-        {"2a03:b0c0:2:d0::16:1",       33445, "788236D34978D1D5BD822F0A5BEBD2C53C64CC31CD3149350EE27D4D9A2F9B6B", {0}},
-        {"tox.zodiaclabs.org",         33445, "A09162D68618E742FFBCA1C2C70385E6679604B2D80EA6E84AD0996A1AC8A074", {0}},
-        {"163.172.136.118",            33445, "2C289F9F37C20D09DA83565588BF496FAB3764853FA38141817A72E3F18ACA0B", {0}},
-        {"2001:bc8:4400:2100::1c:50f", 33445, "2C289F9F37C20D09DA83565588BF496FAB3764853FA38141817A72E3F18ACA0B", {0}},
-        {"128.199.199.197",            33445, "B05C8869DBB4EDDD308F43C1A974A20A725A36EACCA123862FDE9945BF9D3E09", {0}},
-        {"2400:6180:0:d0::17a:a001",   33445, "B05C8869DBB4EDDD308F43C1A974A20A725A36EACCA123862FDE9945BF9D3E09", {0}},
-        {"node.tox.biribiri.org",      33445, "F404ABAA1C99A9D37D61AB54898F56793E1DEF8BD46B1038B9D822E8460FAB67", {0}}
+        {"178.62.250.138",             33445, "788236D34978D1D5BD822F0A5BEBD2C53C64CC31CD3149350EE27D4D9A2F9B6B", NULL},
+        {"2a03:b0c0:2:d0::16:1",       33445, "788236D34978D1D5BD822F0A5BEBD2C53C64CC31CD3149350EE27D4D9A2F9B6B", NULL},
+        {"tox.zodiaclabs.org",         33445, "A09162D68618E742FFBCA1C2C70385E6679604B2D80EA6E84AD0996A1AC8A074", NULL},
+        {"163.172.136.118",            33445, "2C289F9F37C20D09DA83565588BF496FAB3764853FA38141817A72E3F18ACA0B", NULL},
+        {"2001:bc8:4400:2100::1c:50f", 33445, "2C289F9F37C20D09DA83565588BF496FAB3764853FA38141817A72E3F18ACA0B", NULL},
+        {"128.199.199.197",            33445, "B05C8869DBB4EDDD308F43C1A974A20A725A36EACCA123862FDE9945BF9D3E09", NULL},
+        {"2400:6180:0:d0::17a:a001",   33445, "B05C8869DBB4EDDD308F43C1A974A20A725A36EACCA123862FDE9945BF9D3E09", NULL},
+        {"node.tox.biribiri.org",      33445, "F404ABAA1C99A9D37D61AB54898F56793E1DEF8BD46B1038B9D822E8460FAB67", NULL}
     };
 
     for (size_t i = 0; i < sizeof(nodes)/sizeof(DHT_node); i ++) {
-        sodium_hex2bin(nodes[i].key_bin, sizeof(nodes[i].key_bin),
-                       nodes[i].key_hex, sizeof(nodes[i].key_hex)-1, NULL, NULL, NULL);
+        nodes[i].key_bin = hex2bin(nodes[i].key_hex);
         tox_bootstrap(tox, nodes[i].ip, nodes[i].port, nodes[i].key_bin, NULL);
     }
 }
@@ -406,7 +408,7 @@ void friend_message_cb(Tox *tox, uint32_t friend_number, TOX_MESSAGE_TYPE type, 
     struct Friend *f = getfriend(friend_number);
     if (!f) return;
 
-    if (friend_number == TalkingTo) {
+    if (friend_number*TALK_TYPE_COUNT + TALK_TYPE_FRIEND == TalkingTo) {
         if (type == TOX_MESSAGE_TYPE_NORMAL) {
             PRINT(GUEST_MSG_PREFIX "%.*s", getftime(), f->name, (int)length, (char*)message);
         } else {
@@ -423,7 +425,7 @@ void friend_name_cb(Tox *tox, uint32_t friend_number, const uint8_t *name, size_
 
     if (f) {
         RESIZE(f->name, f->name_sz, length);
-        memcpy(f->name, name, length);
+        sprintf(f->name, "%.*s", (int)length, (char*)name);
     }
 }
 
@@ -475,15 +477,27 @@ void conference_invite_cb(Tox *tox, uint32_t friend_number, TOX_CONFERENCE_TYPE 
 
 void conference_title_cb(Tox *tox, uint32_t conference_number, uint32_t peer_number, const uint8_t *title, size_t length, void *user_data) {
     struct Conference *cf = getconfer(conference_number);
+    printf("!!!!!!!!!! get title cb %d\n", conference_number);
     if (cf) {
         RESIZE(cf->title, cf->title_sz, length);
-        memcpy(cf->title, title, length);
+        sprintf(cf->title, "%.*s", (int)length, (char*)title);
     }
 }
 
 void conference_message_cb(Tox *tox, uint32_t conference_number, uint32_t peer_number, TOX_MESSAGE_TYPE type, const uint8_t *message, size_t length, void *user_data) {
     struct Conference *cf = getconfer(conference_number);
-    if (cf) {
+    if (!cf) return;
+
+    if (conference_number * TALK_TYPE_COUNT + TALK_TYPE_CONFERENCE == TalkingTo) {
+        if (type == TOX_MESSAGE_TYPE_NORMAL) {
+            char *peername = get_confer_peername(conference_number, peer_number);
+            if (!peername) return;
+            PRINT(GUEST_MSG_PREFIX "%.*s", getftime(), peername, (int)length, (char*)message);
+        } else {
+            INFO("* receive UNSURPPORT message type");
+        }
+    } else {
+        INFO("* receive CONFERENCE message from %s\n",cf->title);
     }
 }
 
@@ -534,7 +548,7 @@ void init_friends() {
     free(friend_list);
 
     // add self
-    self.friend_number = SELF_FRIENDNUM;
+    self.friend_number = TALK_TYPE_NULL;
     self.name_sz = tox_self_get_name_size(tox) + 1;
     self.name = calloc(1, self.name_sz);
     tox_self_get_name(tox, (uint8_t*)self.name);
@@ -644,13 +658,13 @@ void command_contacts_helper(int narg, char **args) {
     struct Friend *f = friends;
     PRINT("Friends:");
     for (;f != NULL; f = f->next) {
-        PRINT("%4d %15.15s  %12.12s  %s",f->friend_number, f->name, connection_enum2text(f->connection), f->status_message);
+        PRINT("%4d %15.15s  %12.12s  %s",f->friend_number * TALK_TYPE_COUNT + TALK_TYPE_FRIEND, f->name, connection_enum2text(f->connection), f->status_message);
     }
 
     PRINT("Conferences:");
     struct Conference *cf = conferences;
     for (;cf != NULL; cf = cf->next) {
-        PRINT("%4d%6d(peers)  %s",cf->conference_number, cf->peer_count, cf->title);
+        PRINT("%4d  %s",cf->conference_number * TALK_TYPE_COUNT + TALK_TYPE_CONFERENCE, cf->title);
     }
 }
 
@@ -660,19 +674,37 @@ void command_save_helper(int narg, char **args) {
 
 void command_go_helper(int narg, char **args) {
     if (narg == 0) {
-        TalkingTo = SELF_FRIENDNUM;
+        TalkingTo = TALK_TYPE_NULL;
         strcpy(async_repl->prompt, CMD_PROMPT);
         return;
     }
-    uint32_t friend_num = (uint32_t)atoi(args[0]);
-    struct Friend *f = getfriend(friend_num);
-    if (!f) {
-        ERROR("! friend not exist");
-        return;
+    uint32_t num = (uint32_t)atoi(args[0]);
+    switch (num % TALK_TYPE_COUNT) {
+        case TALK_TYPE_FRIEND: {
+            uint32_t friend_num = num/TALK_TYPE_COUNT;
+            struct Friend *f = getfriend(friend_num);
+            if (!f) {
+                ERROR("! friend not exist");
+                return;
+            }
+            TalkingTo = num;
+            sprintf(async_repl->prompt, FRIEND_TALK_PROMPT, f->name);
+            INFO("* talk to friend: %s", f->name);
+            break;
+       }
+        case TALK_TYPE_CONFERENCE: {
+            uint32_t conference_num = num/TALK_TYPE_COUNT;
+            struct Conference *cf = getconfer(conference_num);
+            if (!cf) {
+                ERROR("! conference not exist");
+                return;
+            }
+            TalkingTo = num;
+            sprintf(async_repl->prompt, CONFERENCE_TALK_PROMPT, cf->title);
+            INFO("* talk to conference: %s", cf->title);
+            break;
+       }
     }
-    TalkingTo = friend_num;
-    sprintf(async_repl->prompt, TALK_PROMPT, f->name);
-    INFO("* talk to %s", f->name);
 }
 
 void _command_accept(int narg, char **args, bool is_accept) {
@@ -828,10 +860,16 @@ void repl_iterate(){
             int len = strlen(line);
             line[--len] = '\0'; // remove trailing \n
 
-            if (TalkingTo != SELF_FRIENDNUM && line[0] != '/') {  // if talking to someone, just print the msg out.
+            if (TalkingTo != TALK_TYPE_NULL && line[0] != '/') {  // if talking to someone, just print the msg out.
                 PRINT(SELF_MSG_PREFIX "%.*s", getftime(), self.name, len, line);
-                tox_friend_send_message(tox, TalkingTo, TOX_MESSAGE_TYPE_NORMAL, (uint8_t*)line, strlen(line), NULL);
-                continue; // continue to for_1
+                switch (TalkingTo % TALK_TYPE_COUNT) {
+                    case TALK_TYPE_FRIEND:
+                        tox_friend_send_message(tox, TalkingTo/TALK_TYPE_COUNT, TOX_MESSAGE_TYPE_NORMAL, (uint8_t*)line, strlen(line), NULL);
+                        continue; // continue to for_1
+                    case TALK_TYPE_CONFERENCE:
+                        tox_conference_send_message(tox, TalkingTo/TALK_TYPE_COUNT, TOX_MESSAGE_TYPE_NORMAL, (uint8_t*)line, strlen(line), NULL);
+                        continue;  // continue to for_1
+                }
             }
 
             PRINT(CMD_MSG_PREFIX "%s", line);

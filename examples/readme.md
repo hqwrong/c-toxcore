@@ -13,6 +13,8 @@ bug:
 
 Groupbot conn keeps changing
 
+conference join fail
+
 
 
 ---------------
@@ -20,3 +22,7 @@ Groupbot conn keeps changing
 proposal:
 
 unify self and friend apis
+
+unify get name and get_name_size api;
+
+conference title 初始化不调用callback(跟friend不一致)
