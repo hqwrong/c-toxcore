@@ -15,6 +15,11 @@ Groupbot conn keeps changing
 
 conference join fail
 
+------------------
+doc:
+
+save cookie
+
 
 
 ---------------

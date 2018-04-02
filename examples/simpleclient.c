@@ -23,7 +23,7 @@ typedef struct DHT_node {
 
 struct ConferenceUserData {
     uint32_t friend_number;
-    const uint8_t *cookie;
+    uint8_t *cookie;
     size_t length;
 };
 
@@ -88,6 +88,9 @@ const char *savedata_tmp_filename = "savedata.tox.tmp";
 
 #define LINE_MAX_SIZE 1024
 
+#define PORT_RANGE_START 33445
+#define PORT_RANGE_END   34445
+
 #define CODE_ERASE_LINE    "\r\033[2K" 
 
 #define RESET_COLOR        "\x01b[0m"
@@ -96,8 +99,8 @@ const char *savedata_tmp_filename = "savedata.tox.tmp";
 #define CMD_PROMPT_COLOR   "\x01b[34m" // blue
 
 #define CMD_PROMPT   CMD_PROMPT_COLOR "> " RESET_COLOR // green
-#define FRIEND_TALK_PROMPT  CMD_PROMPT_COLOR ">> %-.12s : " RESET_COLOR
-#define CONFERENCE_TALK_PROMPT  CMD_PROMPT_COLOR ">>> %-.12s : " RESET_COLOR
+#define FRIEND_TALK_PROMPT  CMD_PROMPT_COLOR "%-.12s << " RESET_COLOR
+#define CONFERENCE_TALK_PROMPT  CMD_PROMPT_COLOR "%-.12s <<< " RESET_COLOR
 
 #define GUEST_MSG_PREFIX  GUEST_TALK_COLOR "%s  %12.12s | " RESET_COLOR
 #define SELF_MSG_PREFIX  SELF_TALK_COLOR "%s  %12.12s | " RESET_COLOR
@@ -204,7 +207,7 @@ char *get_confer_peername(uint32_t conference_number, uint32_t peer_number) {
     if (!peername) peername = malloc(tox_max_name_length() + 1);
     TOX_ERR_CONFERENCE_PEER_QUERY err;
     size_t sz = tox_conference_peer_get_name_size(tox, conference_number, peer_number, &err);
-    if (err == TOX_ERR_CONFERENCE_PEER_QUERY_OK) return NULL;
+    if (err != TOX_ERR_CONFERENCE_PEER_QUERY_OK) return NULL;
     tox_conference_peer_get_name(tox, conference_number, peer_number, (uint8_t*)peername, NULL);
     peername[sz] = '\0';
     return peername;
@@ -469,7 +472,8 @@ void conference_invite_cb(Tox *tox, uint32_t friend_number, TOX_CONFERENCE_TYPE 
         requests = req;
 
         req->is_friend_request = false;
-        req->userdata.conference.cookie = cookie;
+        req->userdata.conference.cookie = malloc(length);
+        memcpy(req->userdata.conference.cookie, cookie, length),
         req->userdata.conference.length = length;
         req->userdata.conference.friend_number = friend_number;
         req->msg = malloc(f->name_sz);
@@ -479,7 +483,6 @@ void conference_invite_cb(Tox *tox, uint32_t friend_number, TOX_CONFERENCE_TYPE 
 
 void conference_title_cb(Tox *tox, uint32_t conference_number, uint32_t peer_number, const uint8_t *title, size_t length, void *user_data) {
     struct Conference *cf = getconfer(conference_number);
-    printf("!!!!!!!!!! get title cb %d\n", conference_number);
     if (cf) {
         RESIZE(cf->title, cf->title_sz, length);
         sprintf(cf->title, "%.*s", (int)length, (char*)title);
@@ -488,13 +491,13 @@ void conference_title_cb(Tox *tox, uint32_t conference_number, uint32_t peer_num
 
 void conference_message_cb(Tox *tox, uint32_t conference_number, uint32_t peer_number, TOX_MESSAGE_TYPE type, const uint8_t *message, size_t length, void *user_data) {
     struct Conference *cf = getconfer(conference_number);
-    printf(">>>>>>>>>>>>> conf msg\n");
     if (!cf) return;
+
+    if (tox_conference_peer_number_is_ours(tox, conference_number, peer_number, NULL))  return;
 
     if (conference_number * TALK_TYPE_COUNT + TALK_TYPE_CONFERENCE == TalkingTo) {
         if (type == TOX_MESSAGE_TYPE_NORMAL) {
             char *peername = get_confer_peername(conference_number, peer_number);
-            if (!peername) return;
             PRINT(GUEST_MSG_PREFIX "%.*s", getftime(), peername, (int)length, (char*)message);
         } else {
             INFO("* receive UNSURPPORT message type");
@@ -507,8 +510,8 @@ void conference_message_cb(Tox *tox, uint32_t conference_number, uint32_t peer_n
 void create_tox()
 {
     struct Tox_Options *options = tox_options_new(NULL);
-    tox_options_set_start_port(options, 33445);
-    tox_options_set_end_port(options, 34445);
+    tox_options_set_start_port(options, PORT_RANGE_START);
+    tox_options_set_end_port(options, PORT_RANGE_END);
 
     FILE *f = fopen(savedata_filename, "rb");
     if (f) {
@@ -790,16 +793,21 @@ void command_invite_helper(int narg, char **args) {
 void command_settitle_helper(int narg, char **args) {
     uint32_t conference_number = atoi(args[0]);
     char *title = args[1];
-    if (!getconfer(conference_number)) {
+    struct Conference *cf = getconfer(conference_number);
+    if (!cf) {
         ERROR("! Invalid group number");
         return;
     }
     
     TOX_ERR_CONFERENCE_TITLE  err;
-    tox_conference_set_title(tox, conference_number, (uint8_t*)title, strlen(title), &err);
+    size_t len = strlen(title);
+    tox_conference_set_title(tox, conference_number, (uint8_t*)title, len, &err);
     if (err != TOX_ERR_CONFERENCE_TITLE_OK) {
         ERROR("! set group title failed, errcode: %d",err);
     }
+
+    RESIZE(cf->title, cf->title_sz, len);
+    sprintf(cf->title, "%.*s",(int)len,title);
 }
 
 #define COMMAND_ARGS_REST 100
@@ -927,7 +935,6 @@ void repl_iterate(){
                         tox_friend_send_message(tox, TalkingTo/TALK_TYPE_COUNT, TOX_MESSAGE_TYPE_NORMAL, (uint8_t*)line, strlen(line), NULL);
                         continue; // continue to for_1
                     case TALK_TYPE_CONFERENCE:
-                        printf("############ send grp msg\n");
                         tox_conference_send_message(tox, TalkingTo/TALK_TYPE_COUNT, TOX_MESSAGE_TYPE_NORMAL, (uint8_t*)line, strlen(line), NULL);
                         continue;  // continue to for_1
                 }
