@@ -666,15 +666,15 @@ void command_del_helper(int narg, char **args) {
 
 void command_contacts_helper(int narg, char **args) {
     struct Friend *f = friends;
-    PRINT("Friends:");
+    PRINT("#Friends(talk_num|friend_num|name|connection|status message):\n");
     for (;f != NULL; f = f->next) {
-        PRINT("%4d %15.15s  %12.12s  %s",f->friend_number * TALK_TYPE_COUNT + TALK_TYPE_FRIEND, f->name, connection_enum2text(f->connection), f->status_message);
+        PRINT("%3d  %3d  %15.15s  %10.10s  %s",f->friend_number * TALK_TYPE_COUNT + TALK_TYPE_FRIEND, f->friend_number, f->name, connection_enum2text(f->connection), f->status_message);
     }
 
-    PRINT("Conferences:");
     struct Conference *cf = conferences;
+    PRINT("\n#Groups(talk_num|group_num|count of peers|name):\n");
     for (;cf != NULL; cf = cf->next) {
-        PRINT("%4d  %s %d(peers)",cf->conference_number * TALK_TYPE_COUNT + TALK_TYPE_CONFERENCE, cf->title, tox_conference_peer_count(tox, cf->conference_number, NULL));
+        PRINT("%3d  %3d  %10d  %s",cf->conference_number * TALK_TYPE_COUNT + TALK_TYPE_CONFERENCE, cf->conference_number, tox_conference_peer_count(tox, cf->conference_number, NULL), cf->title);
     }
 }
 
@@ -865,7 +865,7 @@ struct Command commands[] = {
     {
         "go",
         "[<friend_number>] - goto talk to someone if spcified <friend_number> or goto cmd mode.",
-        1,
+        0 + COMMAND_ARGS_REST,
         command_go_helper,
     },
     {
