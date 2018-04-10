@@ -45,17 +45,17 @@ struct Request {
 };
 struct Request *requests = NULL;
 
-struct ChatHistory {
-    uint32_t friend_number;
-    char *msg;
-    struct ChatHistory *prev;
-    struct ChatHistory *next;
+struct ConferPeer {
+    uint8_t pubkey[TOX_PUBLIC_KEY_SIZE];
+    char name[TOX_MAX_NAME_LENGTH + 1];
 };
 
 struct Conference {
     uint32_t conference_number;
     char *title;
     size_t title_sz;
+    struct ConferPeer *peers;
+    size_t peers_count;
 
     struct Conference *next;
 };
@@ -67,7 +67,6 @@ struct Friend {
     char *status_message;
     int status_message_sz;
     TOX_CONNECTION connection;
-    struct ChatHistory *hist;
 
     struct Friend *next;
 };
@@ -507,6 +506,27 @@ void conference_message_cb(Tox *tox, uint32_t conference_number, uint32_t peer_n
     }
 }
 
+void conference_peer_list_changed_cb(Tox *tox, uint32_t conference_number, void *user_data) {
+    struct Conference *cf = getconfer(conference_number);
+    if (!cf) return;
+
+    TOX_ERR_CONFERENCE_PEER_QUERY err;
+    uint32_t count = tox_conference_peer_count(tox, conference_number, &err);
+    if (err != TOX_ERR_CONFERENCE_PEER_QUERY_OK) {
+        ERROR("get conference peer count failed, errcode:%d",err);
+        return;
+    }
+    if (cf->peers) free(cf->peers);
+    cf->peers = calloc(count, sizeof(struct ConferPeer));
+    cf->peers_count = count;
+
+    for (int i=0;i<count;i++) {
+        struct ConferPeer *p = cf->peers + i;
+        tox_conference_peer_get_name(tox, conference_number, i, (uint8_t*)p->name, NULL);
+        tox_conference_peer_get_public_key(tox, conference_number, i, p->pubkey,NULL);
+    }
+}
+
 void create_tox()
 {
     struct Tox_Options *options = tox_options_new(NULL);
@@ -590,6 +610,7 @@ void setup_tox()
     tox_callback_conference_invite(tox, conference_invite_cb);
     tox_callback_conference_title(tox, conference_title_cb);
     tox_callback_conference_message(tox, conference_message_cb);
+    tox_callback_conference_peer_list_changed(tox, conference_peer_list_changed_cb);
 
 
     update_savedata_file(tox);
@@ -610,17 +631,35 @@ struct Command {
 void command_help_helper(int narg, char **args);
 
 void command_info_helper(int narg, char **args) {
-    PRINT("Name:\t%s", self.name);
+    if (narg == 0) { // self
+        PRINT("%-.12s:%s", "Name", self.name);
 
-    uint32_t addr_size = tox_address_size();
-    uint8_t tox_id_bin[addr_size];
-    tox_self_get_address(tox, tox_id_bin);
-    char *hex = bin2hex(tox_id_bin, sizeof(tox_id_bin));
-    PRINT("Tox ID:\t%s", hex);
-    free(hex);
+        uint32_t addr_size = tox_address_size();
+        uint8_t tox_id_bin[addr_size];
+        tox_self_get_address(tox, tox_id_bin);
+        char *hex = bin2hex(tox_id_bin, sizeof(tox_id_bin));
+        PRINT("%-.12s:%s","Tox ID", hex);
+        free(hex);
 
-    PRINT("Status Message:\t%s",self.status_message);
-    PRINT("Network:\t%s",connection_enum2text(self.connection));
+        PRINT("%-.12s:%s", "Status Msg",self.status_message);
+        PRINT("%-.12s:%s", "Network",connection_enum2text(self.connection));
+    }
+    else {
+        int num = atoi(args[0]);
+        if (num % TALK_TYPE_COUNT == TALK_TYPE_CONFERENCE) {
+            struct Conference *cf = getconfer(num / TALK_TYPE_COUNT);
+            if (!cf) {
+                WARN("Invalid contact index");
+                return;
+            }
+            PRINT("GROUP TITLE:\t%s",cf->title);
+            PRINT("PEER COUNT:\t%zu", cf->peers_count);
+            PRINT("Peers:");
+            for (int i=0;i<cf->peers_count;i++){
+                PRINT("\t%s",cf->peers[i].name);
+            }
+        }
+    }
 }
 
 void command_setname_helper(int narg, char **args) {
@@ -823,7 +862,7 @@ struct Command commands[] = {
     {
         "info",
         "- show your info",
-        0,
+        0 + COMMAND_ARGS_REST,
         command_info_helper,
     },
     {
