@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <stdarg.h>
 
 #include <termios.h>
 #include <unistd.h>
@@ -45,6 +46,12 @@ struct Request {
 };
 struct Request *requests = NULL;
 
+struct ChatHist {
+    char *msg;
+    struct ChatHist *next;
+    struct ChatHist *prev;
+};
+
 struct ConferPeer {
     uint8_t pubkey[TOX_PUBLIC_KEY_SIZE];
     char name[TOX_MAX_NAME_LENGTH + 1];
@@ -57,16 +64,18 @@ struct Conference {
     struct ConferPeer *peers;
     size_t peers_count;
 
+    struct ChatHist *hist;
+
     struct Conference *next;
 };
 
 struct Friend {
     uint32_t friend_number;
     char *name;
-    int name_sz;
     char *status_message;
-    int status_message_sz;
     TOX_CONNECTION connection;
+
+    struct ChatHist *hist;
 
     struct Friend *next;
 };
@@ -89,6 +98,8 @@ const char *savedata_tmp_filename = "savedata.tox.tmp";
 
 #define PORT_RANGE_START 33445
 #define PORT_RANGE_END   34445
+
+#define CHAT_HIST_CHUNK_SIZE  1024
 
 #define CODE_ERASE_LINE    "\r\033[2K" 
 
@@ -115,7 +126,6 @@ const char *savedata_tmp_filename = "savedata.tox.tmp";
 #define WARN(_fmt,...) COLOR_PRINT("\x01b[33m", _fmt, ##__VA_ARGS__) // yellow
 #define ERROR(_fmt,...) COLOR_PRINT("\x01b[31m", _fmt, ##__VA_ARGS__) // red
 
-
 ///////////////////////////////
 // Utils
 ////////////////////////////////
@@ -132,6 +142,28 @@ const char *savedata_tmp_filename = "savedata.tox.tmp";
             break;\
         }\
     }\
+
+char* genmsg(struct ChatHist **pp, const char *fmt, ...) {
+    va_list va;
+    va_start(va, fmt);
+
+    va_list va2;
+    va_copy(va2, va);
+    size_t len = vsnprintf(NULL, 0, fmt, va2);
+
+    struct ChatHist *h = malloc(sizeof(struct ChatHist));
+    h->prev = NULL;
+    h->next = (*pp);
+    if (*pp) (*pp)->prev = h;
+    *pp = h;
+    h->msg = malloc(len+1);
+
+    va_list va3;
+    va_copy(va3, va);
+    vsnprintf(h->msg, len+1, fmt, va3);
+
+    return h->msg;
+}
 
 char* getftime() {
     static char timebuf[64];
@@ -231,6 +263,24 @@ char *bin2hex(const uint8_t *bin, size_t length) {
         sprintf(hex, "%02X",bin[i]);
     }
     return saved;
+}
+
+struct ChatHist ** get_current_histp() {
+    if (TalkingTo == TALK_TYPE_NULL) return NULL;
+    uint32_t num = TalkingTo / TALK_TYPE_COUNT;
+    switch (TalkingTo % TALK_TYPE_COUNT) {
+        case TALK_TYPE_FRIEND: {
+            struct Friend *f = getfriend(num);
+            if (f) return &f->hist;
+            break;
+        }
+        case TALK_TYPE_CONFERENCE: {
+            struct Conference *cf = getconfer(num);
+            if (cf) return &cf->hist;
+            break;
+       }
+    }
+    return NULL;
 }
 
 //////////////////////////
@@ -411,13 +461,14 @@ void friend_message_cb(Tox *tox, uint32_t friend_number, TOX_MESSAGE_TYPE type, 
 {
     struct Friend *f = getfriend(friend_number);
     if (!f) return;
+    if (type != TOX_MESSAGE_TYPE_NORMAL) {
+        INFO("* receive MESSAGE ACTION type from %s, no supported", f->name);
+        return;
+    }
 
+    char *msg = genmsg(&f->hist, GUEST_MSG_PREFIX "%.*s", getftime(), f->name, (int)length, (char*)message);
     if (friend_number*TALK_TYPE_COUNT + TALK_TYPE_FRIEND == TalkingTo) {
-        if (type == TOX_MESSAGE_TYPE_NORMAL) {
-            PRINT(GUEST_MSG_PREFIX "%.*s", getftime(), f->name, (int)length, (char*)message);
-        } else {
-            INFO("* receive MESSAGE ACTION type");
-        }
+        PRINT("%s", msg);
     } else {
         INFO("* receive message from %s\n",f->name);
     }
@@ -428,7 +479,7 @@ void friend_name_cb(Tox *tox, uint32_t friend_number, const uint8_t *name, size_
     struct Friend *f = getfriend(friend_number);
 
     if (f) {
-        RESIZE(f->name, f->name_sz, length);
+        f->name = realloc(f->name, length+1);
         sprintf(f->name, "%.*s", (int)length, (char*)name);
     }
 }
@@ -436,8 +487,8 @@ void friend_name_cb(Tox *tox, uint32_t friend_number, const uint8_t *name, size_
 void friend_status_message_cb(Tox *tox, uint32_t friend_number, const uint8_t *message, size_t length, void *user_data) {
     struct Friend *f = getfriend(friend_number);
     if (f) {
-        RESIZE(f->status_message, f->status_message_sz, length);
-        memcpy(f->status_message, message, length);
+        f->status_message = realloc(f->status_message, length + 1);
+        sprintf(f->status_message, "%.*s",(int)length, (char*)message);
     }
 }
 
@@ -475,8 +526,8 @@ void conference_invite_cb(Tox *tox, uint32_t friend_number, TOX_CONFERENCE_TYPE 
         memcpy(req->userdata.conference.cookie, cookie, length),
         req->userdata.conference.length = length;
         req->userdata.conference.friend_number = friend_number;
-        req->msg = malloc(f->name_sz);
-        memcpy(req->msg, f->name, f->name_sz);
+        req->msg = malloc(strlen(f->name) + 1);
+        strcpy(req->msg, f->name);
     }
 }
 
@@ -494,15 +545,19 @@ void conference_message_cb(Tox *tox, uint32_t conference_number, uint32_t peer_n
 
     if (tox_conference_peer_number_is_ours(tox, conference_number, peer_number, NULL))  return;
 
+    if (type != TOX_MESSAGE_TYPE_NORMAL) {
+        INFO("* receive MESSAGE ACTION type from group %s, no supported", cf->title);
+        return;
+    }
+
+    char *peername = get_confer_peername(conference_number, peer_number);
+    char *msg = genmsg(&cf->hist, GUEST_MSG_PREFIX "%.*s", getftime(), peername, (int)length, (char*)message);
+
+    printf(">>> cf histp:%p\n", &cf->hist);
     if (conference_number * TALK_TYPE_COUNT + TALK_TYPE_CONFERENCE == TalkingTo) {
-        if (type == TOX_MESSAGE_TYPE_NORMAL) {
-            char *peername = get_confer_peername(conference_number, peer_number);
-            PRINT(GUEST_MSG_PREFIX "%.*s", getftime(), peername, (int)length, (char*)message);
-        } else {
-            INFO("* receive UNSURPPORT message type");
-        }
+        PRINT("%s", msg);
     } else {
-        INFO("* receive CONFERENCE message from %s\n",cf->title);
+        INFO("* receive group message from %s",cf->title);
     }
 }
 
@@ -562,16 +617,18 @@ void init_friends() {
     uint32_t *friend_list = malloc(sizeof(uint32_t) * sz);
     tox_self_get_friend_list(tox, friend_list);
 
+    size_t len;
+
     for (int i = 0;i<sz;i++) {
         uint32_t friend_num = friend_list[i];
         struct Friend *f = addfriend(friend_num);
 
-        f->name_sz = tox_friend_get_name_size(tox, friend_num, NULL) + 1;
-        f->name = calloc(1, f->name_sz);
+        len = tox_friend_get_name_size(tox, friend_num, NULL) + 1;
+        f->name = calloc(1, len);
         tox_friend_get_name(tox, friend_num, (uint8_t*)f->name, NULL);
 
-        f->status_message_sz = tox_friend_get_status_message_size(tox, friend_num, NULL) + 1;
-        f->status_message = calloc(1, f->status_message_sz);
+        len = tox_friend_get_status_message_size(tox, friend_num, NULL) + 1;
+        f->status_message = calloc(1, len);
         tox_friend_get_status_message(tox, friend_num, (uint8_t*)f->status_message, NULL);
 
     }
@@ -579,12 +636,12 @@ void init_friends() {
 
     // add self
     self.friend_number = TALK_TYPE_NULL;
-    self.name_sz = tox_self_get_name_size(tox) + 1;
-    self.name = calloc(1, self.name_sz);
+    len = tox_self_get_name_size(tox) + 1;
+    self.name = calloc(1, len);
     tox_self_get_name(tox, (uint8_t*)self.name);
 
-    self.status_message_sz = tox_self_get_status_message_size(tox) + 1;
-    self.status_message = calloc(1, self.status_message_sz);
+    len = tox_self_get_status_message_size(tox) + 1;
+    self.status_message = calloc(1, len);
     tox_self_get_status_message(tox, (uint8_t*)self.status_message);
 }
 
@@ -632,17 +689,17 @@ void command_help_helper(int narg, char **args);
 
 void command_info_helper(int narg, char **args) {
     if (narg == 0) { // self
-        PRINT("%-.12s:%s", "Name", self.name);
+        PRINT("%-12s:%s", "Name", self.name);
 
         uint32_t addr_size = tox_address_size();
         uint8_t tox_id_bin[addr_size];
         tox_self_get_address(tox, tox_id_bin);
         char *hex = bin2hex(tox_id_bin, sizeof(tox_id_bin));
-        PRINT("%-.12s:%s","Tox ID", hex);
+        PRINT("%-12s:%s","Tox ID", hex);
         free(hex);
 
-        PRINT("%-.12s:%s", "Status Msg",self.status_message);
-        PRINT("%-.12s:%s", "Network",connection_enum2text(self.connection));
+        PRINT("%-12s:%s", "Status Msg",self.status_message);
+        PRINT("%-12s:%s", "Network",connection_enum2text(self.connection));
     }
     else {
         int num = atoi(args[0]);
@@ -667,8 +724,8 @@ void command_setname_helper(int narg, char **args) {
     size_t len = strlen(name);
     tox_self_set_name(tox, (uint8_t*)name, strlen(name), NULL);
 
-    RESIZE(self.name, self.name_sz, len);
-    sprintf(self.name, "%.*s", (int)len, name);
+    self.name = realloc(self.name, len + 1);
+    strcpy(self.name, name);
 }
 
 void command_setstatus_helper(int narg, char **args) {
@@ -676,8 +733,8 @@ void command_setstatus_helper(int narg, char **args) {
     size_t len = strlen(status);
     tox_self_set_status_message(tox, (uint8_t*)status, strlen(status), NULL);
 
-    RESIZE(self.status_message, self.status_message_sz, len);
-    memcpy(self.status_message, status, len);
+    self.status_message = realloc(self.status_message, len+1);
+    strcpy(self.status_message, status);
 }
 
 void command_add_helper(int narg, char **args) {
@@ -754,6 +811,26 @@ void command_go_helper(int narg, char **args) {
             break;
        }
     }
+}
+
+void command_history_helper(int narg, char **args) {
+    int n = 200;
+    if (narg > 0) n = atoi(args[0]);
+
+    struct ChatHist **hp = get_current_histp();
+    if (!hp) {
+        ERROR("you are not in talk channel");
+        return;
+    }
+
+    struct ChatHist *hist = *hp;
+
+    while (hist && hist->next) hist = hist->next;
+    PRINT("%s", "------------ HISTORY BEGIN ---------------")
+    for (int i=0;i<n && hist; i++,hist=hist->prev) {
+        printf("%s\n", hist->msg);
+    }
+    PRINT("%s", "------------ HISTORY END   ---------------")
 }
 
 void _command_accept(int narg, char **args, bool is_accept) {
@@ -908,6 +985,12 @@ struct Command commands[] = {
         command_go_helper,
     },
     {
+        "history",
+        "[<n>] - show chat history of current channel",
+        0 + COMMAND_ARGS_REST,
+        command_history_helper,
+    },
+    {
         "accept",
         "[<request_number>] - list friend requests or conference invites.",
         0 + COMMAND_ARGS_REST,
@@ -968,7 +1051,13 @@ void repl_iterate(){
             line[--len] = '\0'; // remove trailing \n
 
             if (TalkingTo != TALK_TYPE_NULL && line[0] != '/') {  // if talking to someone, just print the msg out.
-                PRINT(SELF_MSG_PREFIX "%.*s", getftime(), self.name, len, line);
+                struct ChatHist **hp = get_current_histp();
+                if (!hp) {
+                    ERROR("! current talk channel not exsit.");
+                    continue; // continue to for_1
+                }
+                char *msg = genmsg(hp, SELF_MSG_PREFIX "%.*s", getftime(), self.name, len, line);
+                PRINT("%s", msg);
                 switch (TalkingTo % TALK_TYPE_COUNT) {
                     case TALK_TYPE_FRIEND:
                         tox_friend_send_message(tox, TalkingTo/TALK_TYPE_COUNT, TOX_MESSAGE_TYPE_NORMAL, (uint8_t*)line, strlen(line), NULL);
