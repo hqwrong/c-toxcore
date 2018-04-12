@@ -1,8 +1,8 @@
+1. 统一名字 (friend_num, group, group_num)
+
 2. notify message send failed;
 
 5. group chat
-
-6. chat history
 
 7. log
 
@@ -12,8 +12,6 @@
 bug:
 
 Groupbot conn keeps changing
-
-conference join fail
 
 ------------------
 doc:
