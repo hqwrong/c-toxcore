@@ -1,4 +1,8 @@
-1. 统一名字 (friend_num, group, group_num)
+1. Note: input do not overflow 
+
+2. check err
+
+3. remove duplicate empty lines
 
 2. notify message send failed;
 
@@ -7,6 +11,7 @@
 7. log
 
 9. change prompt dynamically when title/name changed
+
 
 --------------------
 bug:

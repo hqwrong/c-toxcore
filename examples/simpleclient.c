@@ -1,4 +1,26 @@
-// gcc -o echo_bot echo_bot.c -std=gnu99 -lsodium libtoxcore.a
+/*
+ * The Tox public API.
+ */
+
+/*
+ * Copyright © 2016-2017 The TokTok team.
+ * Copyright © 2013 Tox project.
+ *
+ * This file is part of Tox, the free peer to peer instant messenger.
+ *
+ * Tox is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Tox is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with Tox.  If not, see <http://www.gnu.org/licenses/>.
+ */
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -12,9 +34,11 @@
 
 #include <tox.h>
 
-///////////////////////////////////////////////////////
-// Consts & Macros
-///////////////////////////////////////////////////////
+/*******************************************************************************
+ *
+ * Consts & Macros
+ *
+ ******************************************************************************/
 
 // where to save the tox data.
 // if don't want to save, set it to NULL.
@@ -36,12 +60,12 @@ struct DHT_node bootstrap_nodes[] = {
     {"2400:6180:0:d0::17a:a001",   33445, "B05C8869DBB4EDDD308F43C1A974A20A725A36EACCA123862FDE9945BF9D3E09"},
 };
 
-#define LINE_MAX_SIZE 512  // If input line's length surpassed this value, it will be truncated.
+#define LINE_MAX_SIZE 11512  // If input line's length surpassed this value, it will be truncated.
 
 #define PORT_RANGE_START 33445     // tox listen port range
 #define PORT_RANGE_END   34445
 
-#define AREPL_INTERVAL  20  // Async REPL iterate interval. unit: millisecond.
+#define AREPL_INTERVAL  30  // Async REPL iterate interval. unit: millisecond.
 
 #define DEFAULT_CHAT_HIST_COUNT  20 // how many items of chat history to show by default;
 
@@ -58,7 +82,7 @@ struct DHT_node bootstrap_nodes[] = {
 
 #define CMD_PROMPT   CMD_PROMPT_COLOR "> " RESET_COLOR // green
 #define FRIEND_TALK_PROMPT  CMD_PROMPT_COLOR "%-.12s << " RESET_COLOR
-#define CONFERENCE_TALK_PROMPT  CMD_PROMPT_COLOR "%-.12s <<< " RESET_COLOR
+#define GROUP_TALK_PROMPT  CMD_PROMPT_COLOR "%-.12s <<< " RESET_COLOR
 
 #define GUEST_MSG_PREFIX  GUEST_TALK_COLOR "%s  %12.12s | " RESET_COLOR
 #define SELF_MSG_PREFIX  SELF_TALK_COLOR "%s  %12.12s | " RESET_COLOR
@@ -75,10 +99,11 @@ struct DHT_node bootstrap_nodes[] = {
 #define ERROR(_fmt,...) COLOR_PRINT("\x01b[31m", _fmt, ##__VA_ARGS__) // red
 
 
-////////////////////////////////////////////////////
-// Headers
-///////////////////////////////////////////////////
-
+/*******************************************************************************
+ *
+ * Headers
+ *
+ ******************************************************************************/
 
 Tox *tox;
 
@@ -92,8 +117,8 @@ struct Command {
 };
 
 
-struct ConferenceUserData {
-    uint32_t friend_number;
+struct GroupUserData {
+    uint32_t friend_num;
     uint8_t *cookie;
     size_t length;
 };
@@ -103,7 +128,7 @@ struct FriendUserData {
 };
 
 union RequestUserData {
-    struct ConferenceUserData conference;
+    struct GroupUserData group;
     struct FriendUserData friend;
 };
 
@@ -122,24 +147,24 @@ struct ChatHist {
     struct ChatHist *prev;
 };
 
-struct ConferPeer {
+struct GroupPeer {
     uint8_t pubkey[TOX_PUBLIC_KEY_SIZE];
     char name[TOX_MAX_NAME_LENGTH + 1];
 };
 
-struct Conference {
-    uint32_t conference_number;
+struct Group {
+    uint32_t group_num;
     char *title;
-    struct ConferPeer *peers;
+    struct GroupPeer *peers;
     size_t peers_count;
 
     struct ChatHist *hist;
 
-    struct Conference *next;
+    struct Group *next;
 };
 
 struct Friend {
-    uint32_t friend_number;
+    uint32_t friend_num;
     char *name;
     char *status_message;
     uint8_t pubkey[TOX_PUBLIC_KEY_SIZE];
@@ -154,16 +179,18 @@ struct Friend *friends = NULL;
 
 struct Friend self;
 
-struct Conference *conferences = NULL;
+struct Group *groups = NULL;
 
-enum TALK_TYPE { TALK_TYPE_FRIEND, TALK_TYPE_CONFERENCE, TALK_TYPE_COUNT, TALK_TYPE_NULL = UINT32_MAX };
+enum TALK_TYPE { TALK_TYPE_FRIEND, TALK_TYPE_GROUP, TALK_TYPE_COUNT, TALK_TYPE_NULL = UINT32_MAX };
 
 uint32_t TalkingTo = TALK_TYPE_NULL;
 
 
-///////////////////////////////
-// Utils
-////////////////////////////////
+/*******************************************************************************
+ *
+ * Utils
+ *
+ ******************************************************************************/
 
 #define RESIZE(key, size_key, length) \
     if ((size_key) < (length + 1)) { \
@@ -234,26 +261,26 @@ const char * connection_enum2text(TOX_CONNECTION conn) {
     }
 }
 
-struct Friend *getfriend(uint32_t friend_number) {
+struct Friend *getfriend(uint32_t friend_num) {
     struct Friend **p = &friends;
-    LIST_FIND(p, (*p)->friend_number == friend_number);
+    LIST_FIND(p, (*p)->friend_num == friend_num);
     return *p;
 }
 
-struct Friend *addfriend(uint32_t friend_number) {
+struct Friend *addfriend(uint32_t friend_num) {
     struct Friend *f = calloc(1, sizeof(struct Friend));
     f->next = friends;
     friends = f;
-    f->friend_number = friend_number;
+    f->friend_num = friend_num;
     f->connection = TOX_CONNECTION_NONE;
-    tox_friend_get_public_key(tox, friend_number, f->pubkey, NULL);
+    tox_friend_get_public_key(tox, friend_num, f->pubkey, NULL);
     return f;
 }
 
 
-bool delfriend(uint32_t friend_number) {
+bool delfriend(uint32_t friend_num) {
     struct Friend **p = &friends;
-    LIST_FIND(p, (*p)->friend_number == friend_number);
+    LIST_FIND(p, (*p)->friend_num == friend_num);
     struct Friend *f = *p;
     if (f) {
         *p = f->next;
@@ -270,20 +297,20 @@ bool delfriend(uint32_t friend_number) {
     return 0;
 }
 
-struct Conference *addconfer(uint32_t conference_number) {
-    struct Conference *cf = calloc(1, sizeof(struct Conference));
-    cf->next = conferences;
-    conferences = cf;
+struct Group *addgroup(uint32_t group_num) {
+    struct Group *cf = calloc(1, sizeof(struct Group));
+    cf->next = groups;
+    groups = cf;
 
-    cf->conference_number = conference_number;
+    cf->group_num = group_num;
 
     return cf;
 }
 
-bool delconfer(uint32_t conference_number) {
-    struct Conference **p = &conferences;
-    LIST_FIND(p, (*p)->conference_number == conference_number);
-    struct Conference *cf = *p;
+bool delgroup(uint32_t group_num) {
+    struct Group **p = &groups;
+    LIST_FIND(p, (*p)->group_num == group_num);
+    struct Group *cf = *p;
     if (cf) {
         *p = cf->next;
         if (cf->peers) free(cf->peers);
@@ -299,21 +326,10 @@ bool delconfer(uint32_t conference_number) {
     return 0;
 }
 
-struct Conference *getconfer(uint32_t conference_number) {
-    struct Conference **p = &conferences;
-    LIST_FIND(p, (*p)->conference_number == conference_number);
+struct Group *getgroup(uint32_t group_num) {
+    struct Group **p = &groups;
+    LIST_FIND(p, (*p)->group_num == group_num);
     return *p;
-}
-
-char *get_confer_peername(uint32_t conference_number, uint32_t peer_number) {
-    static char *peername = NULL;
-    if (!peername) peername = malloc(tox_max_name_length() + 1);
-    TOX_ERR_CONFERENCE_PEER_QUERY err;
-    size_t sz = tox_conference_peer_get_name_size(tox, conference_number, peer_number, &err);
-    if (err != TOX_ERR_CONFERENCE_PEER_QUERY_OK) return NULL;
-    tox_conference_peer_get_name(tox, conference_number, peer_number, (uint8_t*)peername, NULL);
-    peername[sz] = '\0';
-    return peername;
 }
 
 uint8_t *hex2bin(const char *hex)
@@ -346,8 +362,8 @@ struct ChatHist ** get_current_histp() {
             if (f) return &f->hist;
             break;
         }
-        case TALK_TYPE_CONFERENCE: {
-            struct Conference *cf = getconfer(num);
+        case TALK_TYPE_GROUP: {
+            struct Group *cf = getgroup(num);
             if (cf) return &cf->hist;
             break;
        }
@@ -355,9 +371,11 @@ struct ChatHist ** get_current_histp() {
     return NULL;
 }
 
-//////////////////////////
-// Async REPL
-/// //////////////////////
+/*******************************************************************************
+ *
+ * Async REPL
+ *
+ ******************************************************************************/
 
 struct AsyncREPL {
     char *line;
@@ -367,7 +385,7 @@ struct AsyncREPL {
     int nstack;
 };
 
-struct termios saved_tattr;
+struct termios saved_tattr, saved_oattr;
 
 struct AsyncREPL *async_repl;
 
@@ -381,7 +399,7 @@ void setup_arepl() {
 
     strcpy(async_repl->prompt, CMD_PROMPT);
 
-    /* Set the Non-Canonical terminal mode. */
+    /* Set stdin to Non-Canonical terminal mode. */
     struct termios tattr;
     tcgetattr(STDIN_FILENO, &tattr);
     saved_tattr = tattr;  // save it to restore when exit
@@ -389,6 +407,12 @@ void setup_arepl() {
     tattr.c_cc[VMIN] = 1;
     tattr.c_cc[VTIME] = 0;
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &tattr);
+
+    struct termios oattr;
+    tcgetattr(STDOUT_FILENO, &oattr);
+    saved_oattr = oattr;
+    oattr.c_oflag &= ~OFDEL;  // wrap line when input rightmost column.
+    tcsetattr(STDOUT_FILENO, TCSAFLUSH, &oattr);
 
     /* Set Non-Blocking stdin */
     int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
@@ -468,19 +492,20 @@ int arepl_readline(struct AsyncREPL *arepl, char c, char *line, size_t sz){
     return 0;
 }
 
-/////////////////////////////////////////////
-// Tox Callbacks
-////////////////////////////////////////////
+/*******************************************************************************
+ *
+ * Tox Callbacks
+ *
+ ******************************************************************************/
 
-
-void receipt_callback(Tox *tox, uint32_t friend_number, uint32_t message_id, void *user_data) {
-    printf("receipt received: %d, %d\n", friend_number, message_id);
+void receipt_callback(Tox *tox, uint32_t friend_num, uint32_t message_id, void *user_data) {
+    printf("receipt received: %d, %d\n", friend_num, message_id);
 }
 
-void friend_message_cb(Tox *tox, uint32_t friend_number, TOX_MESSAGE_TYPE type, const uint8_t *message,
+void friend_message_cb(Tox *tox, uint32_t friend_num, TOX_MESSAGE_TYPE type, const uint8_t *message,
                                    size_t length, void *user_data)
 {
-    struct Friend *f = getfriend(friend_number);
+    struct Friend *f = getfriend(friend_num);
     if (!f) return;
     if (type != TOX_MESSAGE_TYPE_NORMAL) {
         INFO("* receive MESSAGE ACTION type from %s, no supported", f->name);
@@ -488,16 +513,15 @@ void friend_message_cb(Tox *tox, uint32_t friend_number, TOX_MESSAGE_TYPE type, 
     }
 
     char *msg = genmsg(&f->hist, GUEST_MSG_PREFIX "%.*s", getftime(), f->name, (int)length, (char*)message);
-    if (GEN_INDEX(friend_number, TALK_TYPE_FRIEND) == TalkingTo) {
+    if (GEN_INDEX(friend_num, TALK_TYPE_FRIEND) == TalkingTo) {
         PRINT("%s", msg);
     } else {
         INFO("* receive message from %s\n",f->name);
     }
 }
 
-
-void friend_name_cb(Tox *tox, uint32_t friend_number, const uint8_t *name, size_t length, void *user_data) {
-    struct Friend *f = getfriend(friend_number);
+void friend_name_cb(Tox *tox, uint32_t friend_num, const uint8_t *name, size_t length, void *user_data) {
+    struct Friend *f = getfriend(friend_num);
 
     if (f) {
         f->name = realloc(f->name, length+1);
@@ -505,18 +529,17 @@ void friend_name_cb(Tox *tox, uint32_t friend_number, const uint8_t *name, size_
     }
 }
 
-void friend_status_message_cb(Tox *tox, uint32_t friend_number, const uint8_t *message, size_t length, void *user_data) {
-    struct Friend *f = getfriend(friend_number);
+void friend_status_message_cb(Tox *tox, uint32_t friend_num, const uint8_t *message, size_t length, void *user_data) {
+    struct Friend *f = getfriend(friend_num);
     if (f) {
         f->status_message = realloc(f->status_message, length + 1);
         sprintf(f->status_message, "%.*s",(int)length, (char*)message);
     }
 }
 
-
-void friend_connection_status_cb(Tox *tox, uint32_t friend_number, TOX_CONNECTION connection_status, void *user_data)
+void friend_connection_status_cb(Tox *tox, uint32_t friend_num, TOX_CONNECTION connection_status, void *user_data)
 {
-    struct Friend *f = getfriend(friend_number);
+    struct Friend *f = getfriend(friend_num);
     if (f) {
         f->connection = connection_status;
         INFO("* %s is %s", f->name, connection_enum2text(connection_status));
@@ -544,82 +567,88 @@ void self_connection_status_cb(Tox *tox, TOX_CONNECTION connection_status, void 
     INFO("* You are %s", connection_enum2text(connection_status));
 }
 
-void conference_invite_cb(Tox *tox, uint32_t friend_number, TOX_CONFERENCE_TYPE type, const uint8_t *cookie, size_t length, void *user_data) {
-    struct Friend *f = getfriend(friend_number);
+void group_invite_cb(Tox *tox, uint32_t friend_num, TOX_CONFERENCE_TYPE type, const uint8_t *cookie, size_t length, void *user_data) {
+    struct Friend *f = getfriend(friend_num);
     if (f) {
         if (type == TOX_CONFERENCE_TYPE_AV) {
-            WARN("* %s invites you to an AV conference, which has not been supported.", f->name);
+            WARN("* %s invites you to an AV group, which has not been supported.", f->name);
             return;
         }
-        INFO("* %s invites you to a conference(try `/accept` to see)",f->name);
+        INFO("* %s invites you to a group(try `/accept` to see)",f->name);
         struct Request *req = malloc(sizeof(struct Request));
         req->id = 1 + ((requests != NULL) ? requests->id : 0);
         req->next = requests;
         requests = req;
 
         req->is_friend_request = false;
-        req->userdata.conference.cookie = malloc(length);
-        memcpy(req->userdata.conference.cookie, cookie, length),
-        req->userdata.conference.length = length;
-        req->userdata.conference.friend_number = friend_number;
+        req->userdata.group.cookie = malloc(length);
+        memcpy(req->userdata.group.cookie, cookie, length),
+        req->userdata.group.length = length;
+        req->userdata.group.friend_num = friend_num;
         req->msg = malloc(strlen("From ") + strlen(f->name) + 1);
         sprintf(req->msg, "%s%s", "From ", f->name);
     }
 }
 
-void conference_title_cb(Tox *tox, uint32_t conference_number, uint32_t peer_number, const uint8_t *title, size_t length, void *user_data) {
-    struct Conference *cf = getconfer(conference_number);
+void group_title_cb(Tox *tox, uint32_t group_num, uint32_t peer_number, const uint8_t *title, size_t length, void *user_data) {
+    struct Group *cf = getgroup(group_num);
     if (cf) {
         cf->title = realloc(cf->title, length+1);
         sprintf(cf->title, "%.*s", (int)length, (char*)title);
     }
 }
 
-void conference_message_cb(Tox *tox, uint32_t conference_number, uint32_t peer_number, TOX_MESSAGE_TYPE type, const uint8_t *message, size_t length, void *user_data) {
-    struct Conference *cf = getconfer(conference_number);
+void group_message_cb(Tox *tox, uint32_t group_num, uint32_t peer_number, TOX_MESSAGE_TYPE type, const uint8_t *message, size_t length, void *user_data) {
+    struct Group *cf = getgroup(group_num);
     if (!cf) return;
 
-    if (tox_conference_peer_number_is_ours(tox, conference_number, peer_number, NULL))  return;
+    if (tox_conference_peer_number_is_ours(tox, group_num, peer_number, NULL))  return;
 
     if (type != TOX_MESSAGE_TYPE_NORMAL) {
         INFO("* receive MESSAGE ACTION type from group %s, no supported", cf->title);
         return;
     }
+    if (peer_number >= cf->peers_count) {
+        ERROR("! Unknown peer_number, peer_count:%zu, peer_number:%u", cf->peers_count, peer_number);
+        return;
+    }
 
-    char *peername = get_confer_peername(conference_number, peer_number);
-    char *msg = genmsg(&cf->hist, GUEST_MSG_PREFIX "%.*s", getftime(), peername, (int)length, (char*)message);
+    struct GroupPeer *peer = &cf->peers[peer_number];
+    char *msg = genmsg(&cf->hist, GUEST_MSG_PREFIX "%.*s", getftime(), peer->name, (int)length, (char*)message);
 
-    if (GEN_INDEX(conference_number, TALK_TYPE_CONFERENCE) == TalkingTo) {
+    if (GEN_INDEX(group_num, TALK_TYPE_GROUP) == TalkingTo) {
         PRINT("%s", msg);
     } else {
-        INFO("* receive group message from %s",cf->title);
+        INFO("* receive group message from %s, in group %s",peer->name, cf->title);
     }
 }
 
-void conference_peer_list_changed_cb(Tox *tox, uint32_t conference_number, void *user_data) {
-    struct Conference *cf = getconfer(conference_number);
+void group_peer_list_changed_cb(Tox *tox, uint32_t group_num, void *user_data) {
+    struct Group *cf = getgroup(group_num);
     if (!cf) return;
 
     TOX_ERR_CONFERENCE_PEER_QUERY err;
-    uint32_t count = tox_conference_peer_count(tox, conference_number, &err);
+    uint32_t count = tox_conference_peer_count(tox, group_num, &err);
     if (err != TOX_ERR_CONFERENCE_PEER_QUERY_OK) {
-        ERROR("get conference peer count failed, errcode:%d",err);
+        ERROR("get group peer count failed, errcode:%d",err);
         return;
     }
     if (cf->peers) free(cf->peers);
-    cf->peers = calloc(count, sizeof(struct ConferPeer));
+    cf->peers = calloc(count, sizeof(struct GroupPeer));
     cf->peers_count = count;
 
     for (int i=0;i<count;i++) {
-        struct ConferPeer *p = cf->peers + i;
-        tox_conference_peer_get_name(tox, conference_number, i, (uint8_t*)p->name, NULL);
-        tox_conference_peer_get_public_key(tox, conference_number, i, p->pubkey,NULL);
+        struct GroupPeer *p = cf->peers + i;
+        tox_conference_peer_get_name(tox, group_num, i, (uint8_t*)p->name, NULL);
+        tox_conference_peer_get_public_key(tox, group_num, i, p->pubkey,NULL);
     }
 }
 
-//////////////////////////////////////////////////
-// Tox setup
-/////////////////////////////////////////////////
+/*******************************************************************************
+ *
+ * Tox Setup
+ *
+ ******************************************************************************/
 
 void create_tox()
 {
@@ -635,7 +664,6 @@ void create_tox()
             fseek(f, 0, SEEK_SET);
 
             char *savedata = malloc(fsize);
-
             fread(savedata, fsize, 1, f);
             fclose(f);
 
@@ -676,7 +704,7 @@ void init_friends() {
     free(friend_list);
 
     // add self
-    self.friend_number = TALK_TYPE_NULL;
+    self.friend_num = TALK_TYPE_NULL;
     len = tox_self_get_name_size(tox) + 1;
     self.name = calloc(1, len);
     tox_self_get_name(tox, (uint8_t*)self.name);
@@ -716,7 +744,7 @@ void bootstrap()
 
 void setup_tox()
 {
-    create_tox();
+    create_tox(); 
     init_friends();
     bootstrap();
 
@@ -732,52 +760,54 @@ void setup_tox()
     tox_callback_friend_status_message(tox, friend_status_message_cb); 
     tox_callback_friend_connection_status(tox, friend_connection_status_cb);
 
-    // conference
-    tox_callback_conference_invite(tox, conference_invite_cb);
-    tox_callback_conference_title(tox, conference_title_cb);
-    tox_callback_conference_message(tox, conference_message_cb);
-    tox_callback_conference_peer_list_changed(tox, conference_peer_list_changed_cb);
+    // group
+    tox_callback_conference_invite(tox, group_invite_cb);
+    tox_callback_conference_title(tox, group_title_cb);
+    tox_callback_conference_message(tox, group_message_cb);
+    tox_callback_conference_peer_list_changed(tox, group_peer_list_changed_cb);
 }
 
-/////////////////////////////////////////////////
-// REPL Commands
-////////////////////////////////////////////////
-
+/*******************************************************************************
+ *
+ * Commands
+ *
+ ******************************************************************************/
 
 void command_help(int narg, char **args);
 
 void command_guide(int narg, char **args) {
-    PRINT("Note:\n\tThis program is an minimal example of client implementation.");
-    PRINT("\tIt should only be used for learning or playing with.\n");
-    PRINT("\tDO NOT use it for Daily Use.\n")
+    PRINT("This program is an minimal workable implementation of Tox client.");
+    PRINT("As it pursued simplicity at the cost of robustness and efficiency,");
+    PRINT("It should only be used for learning or playing with, instead of daily use.\n");
 
-    PRINT("Command was leading by `/`, like `/help`, `/info`, etc."); 
-    PRINT("Command args are seprated by blanks, while some special commands may accept any-character arg, like `/setname` and `/setstmsg`.\n");
+    PRINT("Commands are any input lines with leading `/`,"); 
+    PRINT("Command args are seprated by blanks,");
+    PRINT("while some special commands may accept any-character string, like `/setname` and `/setstmsg`.\n");
 
-    PRINT("Use `/setname` to set your name.");
+    PRINT("Use `/setname <YOUR NAME>` to set your name");
     PRINT("Use `/info` to get your current info, like name and network connection status.");
-    PRINT("Use `/contacts` to list your friends and groups, And use `/go` to talk to one of them.");
+    PRINT("Use `/contacts` to list friends and groups, and use `/go <TARGET>` to talk to one of them.");
     PRINT("Finally, use `/help` to get a list of available commands.\n");
 
     PRINT("HAVE FUN!\n")
 }
 
 void _print_friend_info(struct Friend *f, bool is_self) {
-    PRINT("%-12s%s", "Name:", f->name);
+    PRINT("%-15s%s", "Name:", f->name);
 
     if (is_self) {
         uint8_t tox_id_bin[TOX_ADDRESS_SIZE];
         tox_self_get_address(tox, tox_id_bin);
         char *hex = bin2hex(tox_id_bin, sizeof(tox_id_bin));
-        PRINT("%-12s%s","Tox ID:", hex);
+        PRINT("%-15s%s","Tox ID:", hex);
         free(hex);
     }
 
     char *hex = bin2hex(f->pubkey, sizeof(f->pubkey));
-    PRINT("%-12s%s","PUBLIC KEY:", hex);
+    PRINT("%-15s%s","Public Key:", hex);
     free(hex);
-    PRINT("%-12s%s", "Status Msg:",f->status_message);
-    PRINT("%-12s%s", "Network:",connection_enum2text(self.connection));
+    PRINT("%-15s%s", "Status Msg:",f->status_message);
+    PRINT("%-15s%s", "Network:",connection_enum2text(f->connection));
 }
 
 void command_info(int narg, char **args) {
@@ -799,8 +829,8 @@ void command_info(int narg, char **args) {
             }
             break;
         }
-        case TALK_TYPE_CONFERENCE: {
-            struct Conference *cf = getconfer(num);
+        case TALK_TYPE_GROUP: {
+            struct Group *cf = getgroup(num);
             if (cf) {
                 PRINT("GROUP TITLE:\t%s",cf->title);
                 PRINT("PEER COUNT:\t%zu", cf->peers_count);
@@ -814,13 +844,19 @@ void command_info(int narg, char **args) {
         }
     }
 FAIL:
-    ERROR("! Invalid contact index");
+    WARN("^ Invalid contact index");
 }
 
 void command_setname(int narg, char **args) {
     char *name = args[0];
     size_t len = strlen(name);
-    tox_self_set_name(tox, (uint8_t*)name, strlen(name), NULL);
+    TOX_ERR_SET_INFO err;
+    tox_self_set_name(tox, (uint8_t*)name, strlen(name), &err);
+
+    if (err != TOX_ERR_SET_INFO_OK) {
+        ERROR("! set name failed, errcode:%d", err);
+        return;
+    }
 
     self.name = realloc(self.name, len + 1);
     strcpy(self.name, name);
@@ -829,7 +865,12 @@ void command_setname(int narg, char **args) {
 void command_setstmsg(int narg, char **args) {
     char *status = args[0];
     size_t len = strlen(status);
-    tox_self_set_status_message(tox, (uint8_t*)status, strlen(status), NULL);
+    TOX_ERR_SET_INFO err;
+    tox_self_set_status_message(tox, (uint8_t*)status, strlen(status), &err);
+    if (err != TOX_ERR_SET_INFO_OK) {
+        ERROR("! set status message failed, errcode:%d", err);
+        return;
+    }
 
     self.status_message = realloc(self.status_message, len+1);
     strcpy(self.status_message, status);
@@ -843,10 +884,16 @@ void command_add(int narg, char **args) {
     }
 
     uint8_t *bin_id = hex2bin(hex_id);
-    uint32_t friend_number = tox_friend_add(tox, bin_id, (uint8_t*)msg, sizeof(msg), NULL);
+    TOX_ERR_FRIEND_ADD err;
+    uint32_t friend_num = tox_friend_add(tox, bin_id, (uint8_t*)msg, sizeof(msg), &err);
     free(bin_id);
 
-    addfriend(friend_number);
+    if (err != TOX_ERR_FRIEND_ADD_OK) {
+        ERROR("! add friend failed, errcode:%d",err);
+        return;
+    }
+
+    addfriend(friend_num);
 }
 
 void command_del(int narg, char **args) {
@@ -860,28 +907,28 @@ void command_del(int narg, char **args) {
                 return;
             }
             break;
-        case TALK_TYPE_CONFERENCE:
-            if (delconfer(num)) {
+        case TALK_TYPE_GROUP:
+            if (delgroup(num)) {
                 tox_conference_delete(tox, num, NULL);
                 return;
             }
             break;
     }
 FAIL:
-    ERROR("! Invalid contact index");
+    WARN("^ Invalid contact index");
 }
 
 void command_contacts(int narg, char **args) {
     struct Friend *f = friends;
     PRINT("#Friends(conctact_index|name|connection|status message):\n");
     for (;f != NULL; f = f->next) {
-        PRINT("%3d  %15.15s  %10.10s  %s",GEN_INDEX(f->friend_number, TALK_TYPE_FRIEND), f->name, connection_enum2text(f->connection), f->status_message);
+        PRINT("%3d  %15.15s  %10.10s  %s",GEN_INDEX(f->friend_num, TALK_TYPE_FRIEND), f->name, connection_enum2text(f->connection), f->status_message);
     }
 
-    struct Conference *cf = conferences;
+    struct Group *cf = groups;
     PRINT("\n#Groups(contact_index|count of peers|name):\n");
     for (;cf != NULL; cf = cf->next) {
-        PRINT("%3d  %10d  %s",GEN_INDEX(cf->conference_number, TALK_TYPE_CONFERENCE), tox_conference_peer_count(tox, cf->conference_number, NULL), cf->title);
+        PRINT("%3d  %10d  %s",GEN_INDEX(cf->group_num, TALK_TYPE_GROUP), tox_conference_peer_count(tox, cf->group_num, NULL), cf->title);
     }
 }
 
@@ -904,17 +951,15 @@ void command_go(int narg, char **args) {
             if (f) {
                 TalkingTo = contact_idx;
                 sprintf(async_repl->prompt, FRIEND_TALK_PROMPT, f->name);
-                INFO("* talk to friend: %s", f->name);
                 return;
             }
             break;
         }
-        case TALK_TYPE_CONFERENCE: {
-            struct Conference *cf = getconfer(num);
+        case TALK_TYPE_GROUP: {
+            struct Group *cf = getgroup(num);
             if (cf) {
                 TalkingTo = contact_idx;
-                sprintf(async_repl->prompt, CONFERENCE_TALK_PROMPT, cf->title);
-                INFO("* talk to conference: %s", cf->title);
+                sprintf(async_repl->prompt, GROUP_TALK_PROMPT, cf->title);
                 return;
             }
             break;
@@ -922,18 +967,18 @@ void command_go(int narg, char **args) {
     }
 
 FAIL:
-    ERROR("! Invalid contact index");
+    WARN("^ Invalid contact index");
 }
 
 void command_history(int narg, char **args) {
     uint32_t n = DEFAULT_CHAT_HIST_COUNT;
     if (narg > 0 && !str2uint(args[0], &n)) {
-        ERROR("! Invalid args");
+        WARN("^ Invalid args");
     }
 
     struct ChatHist **hp = get_current_histp();
     if (!hp) {
-        ERROR("you are not talking to someone");
+        WARN("you are not talking to someone");
         return;
     }
 
@@ -951,7 +996,7 @@ void _command_accept(int narg, char **args, bool is_accept) {
     if (narg == 0) {
         struct Request * req = requests;
         for (;req != NULL;req=req->next) {
-            PRINT("%-9u%-12s%s", req->id, (req->is_friend_request ? "FRIEND" : "CONFERENCE"), req->msg);
+            PRINT("%-9u%-12s%s", req->id, (req->is_friend_request ? "FRIEND" : "GROUP"), req->msg);
         }
         return;
     }
@@ -965,20 +1010,21 @@ void _command_accept(int narg, char **args, bool is_accept) {
         *p = req->next;
         if (is_accept) {
             if (req->is_friend_request) {
-                uint32_t friend_num = tox_friend_add_norequest(tox, req->userdata.friend.pubkey, NULL);
-                if (friend_num == UINT32_MAX) {
-                    ERROR("! accept friend request failed");
+                TOX_ERR_FRIEND_ADD err;
+                uint32_t friend_num = tox_friend_add_norequest(tox, req->userdata.friend.pubkey, &err);
+                if (err != TOX_ERR_FRIEND_ADD_OK) {
+                    ERROR("! accept friend request failed, errcode:%d", err);
                 } else {
                     addfriend(friend_num);
                 }
-            } else { // conference invite
-                struct ConferenceUserData *data = &req->userdata.conference;
+            } else { // group invite
+                struct GroupUserData *data = &req->userdata.group;
                 TOX_ERR_CONFERENCE_JOIN err;
-                uint32_t conference_number = tox_conference_join(tox, data->friend_number, data->cookie, data->length, &err);
+                uint32_t group_num = tox_conference_join(tox, data->friend_num, data->cookie, data->length, &err);
                 if (err != TOX_ERR_CONFERENCE_JOIN_OK) {
-                    ERROR("! join conference failed, errcode: %d", err);
+                    ERROR("! join group failed, errcode: %d", err);
                 } else {
-                    addconfer(conference_number);
+                    addgroup(group_num);
                 }
             }
         }
@@ -987,7 +1033,7 @@ void _command_accept(int narg, char **args, bool is_accept) {
         return;
     }
 FAIL:
-    ERROR("! Invalid request index");
+    WARN("Invalid request index");
 }
 
 void command_accept(int narg, char **args) {
@@ -1001,54 +1047,55 @@ void command_deny(int narg, char **args) {
 void command_invite(int narg, char **args) {
     uint32_t friend_contact_idx;
     if (!str2uint(args[0], &friend_contact_idx) || INDEX_TO_TYPE(friend_contact_idx) != TALK_TYPE_FRIEND) {
-        ERROR("! Invalid friend contact index");
+        WARN("Invalid friend contact index");
         return;
     }
     int err;
-    uint32_t conference_number;
+    uint32_t group_num;
     if (narg == 1) {
-        conference_number = tox_conference_new(tox, (TOX_ERR_CONFERENCE_NEW*)&err);
+        group_num = tox_conference_new(tox, (TOX_ERR_CONFERENCE_NEW*)&err);
         if (err != TOX_ERR_CONFERENCE_NEW_OK) {
-            ERROR("! create conference failed, errcode:%d", err);
+            ERROR("! Create group failed, errcode:%d", err);
             return;
         }
-        addconfer(conference_number);
+        addgroup(group_num);
     } else {
-        uint32_t conference_contact_idx;
-        if (!str2uint(args[1], &conference_contact_idx) || INDEX_TO_TYPE(conference_contact_idx) != TALK_TYPE_CONFERENCE) {
-            ERROR("! Invalid conference contact index");
+        uint32_t group_contact_idx;
+        if (!str2uint(args[1], &group_contact_idx) || INDEX_TO_TYPE(group_contact_idx) != TALK_TYPE_GROUP) {
+            ERROR("! Invalid group contact index");
             return;
         }
-        conference_number = INDEX_TO_NUM(conference_contact_idx);
+        group_num = INDEX_TO_NUM(group_contact_idx);
     }
 
     uint32_t friend_num = INDEX_TO_NUM(friend_contact_idx);
-    tox_conference_invite(tox, friend_num, conference_number, (TOX_ERR_CONFERENCE_INVITE*)&err);
+    tox_conference_invite(tox, friend_num, group_num, (TOX_ERR_CONFERENCE_INVITE*)&err);
     if (err != TOX_ERR_CONFERENCE_INVITE_OK) {
-        ERROR("! conference invite failed, errcode:%d", err);
+        ERROR("! Group invite failed, errcode:%d", err);
         return;
     }
 }
 
 void command_settitle(int narg, char **args) {
-    uint32_t conference_contact_idx;
-    if (!str2uint(args[0], &conference_contact_idx) || INDEX_TO_TYPE(conference_contact_idx) != TALK_TYPE_CONFERENCE){
-        ERROR("! Invalid conference contact index");
+    uint32_t group_contact_idx;
+    if (!str2uint(args[0], &group_contact_idx) || INDEX_TO_TYPE(group_contact_idx) != TALK_TYPE_GROUP){
+        ERROR("! Invalid group contact index");
         return;
     }
-    uint32_t conference_number = INDEX_TO_NUM(conference_contact_idx);
-    struct Conference *cf = getconfer(conference_number);
+    uint32_t group_num = INDEX_TO_NUM(group_contact_idx);
+    struct Group *cf = getgroup(group_num);
     if (!cf) {
-        ERROR("! Invalid conference contact index");
+        ERROR("! Invalid group contact index");
         return;
     }
     
     char *title = args[1];
     size_t len = strlen(title);
     TOX_ERR_CONFERENCE_TITLE  err;
-    tox_conference_set_title(tox, conference_number, (uint8_t*)title, len, &err);
+    tox_conference_set_title(tox, group_num, (uint8_t*)title, len, &err);
     if (err != TOX_ERR_CONFERENCE_TITLE_OK) {
-        ERROR("! set group title failed, errcode: %d",err);
+        ERROR("! Set group title failed, errcode: %d",err);
+        return;
     }
 
     cf->title = realloc(cf->title, len+1);
@@ -1072,8 +1119,14 @@ struct Command commands[] = {
         command_help,
     },
     {
+        "save",
+        "- save your data.",
+        0,
+        command_save,
+    },
+    {
         "info",
-        "[<contact_index>] - show your(default) or contact's info.",
+        "[<contact_index>] - show one contact's info, or yourself's info if <contact_index> is empty. ",
         0 + COMMAND_ARGS_REST,
         command_info,
     },
@@ -1108,12 +1161,6 @@ struct Command commands[] = {
         command_contacts,
     },
     {
-        "save",
-        "- save your data.",
-        0,
-        command_save,
-    },
-    {
         "go",
         "[<contact_index>] - goto talk to a contact, or goto cmd mode if <contact_index> is empty.",
         0 + COMMAND_ARGS_REST,
@@ -1135,31 +1182,33 @@ struct Command commands[] = {
         "deny",
         "[<request_index>] - deny or list(if no <request_index> was provided) friend/group requests.",
         0 + COMMAND_ARGS_REST,
-        command_accept,
+        command_deny,
     },
     {
         "invite",
-        "<friend_contact_index> [<conference_contact_index>]- invite a friend to a group chat. if <conference_contact_index> is empty, a new conference will be created.",
+        "<friend_contact_index> [<group_contact_index>] - invite a friend to a group chat. if <group_contact_index> is empty, a new group will be created.",
         1 + COMMAND_ARGS_REST,
         command_invite,
     },
     {
         "settitle",
-        "<conference_contact_index> <title> - set group title.",
+        "<group_contact_index> <title> - set group title.",
         2,
         command_settitle,
     },
 };
 
 void command_help(int narg, char **args){
-    for (int i=0;i<sizeof(commands)/sizeof(struct Command);i++) {
-        PRINT("%-16s\t%s", commands[i].name, commands[i].desc);
+    for (int i=1;i<COMMAND_LENGTH;i++) {
+        printf("%-16s%s\n", commands[i].name, commands[i].desc);
     }
 }
 
-//////////////////////////////////////////////////////
-// REPL
-/////////////////////////////////////////////////////
+/*******************************************************************************
+ *
+ * Main
+ *
+ ******************************************************************************/
 
 char *poptok(char **strp) {
     static const char *dem = " \t";
@@ -1192,17 +1241,17 @@ void repl_iterate(){
             if (TalkingTo != TALK_TYPE_NULL && line[0] != '/') {  // if talking to someone, just print the msg out.
                 struct ChatHist **hp = get_current_histp();
                 if (!hp) {
-                    ERROR("! current talk channel not exsit.");
+                    ERROR("! You are not talking to someone.");
                     continue; // continue to for_1
                 }
                 char *msg = genmsg(hp, SELF_MSG_PREFIX "%.*s", getftime(), self.name, len, line);
                 PRINT("%s", msg);
-                switch (TalkingTo % TALK_TYPE_COUNT) {
+                switch (INDEX_TO_TYPE(TalkingTo)) {
                     case TALK_TYPE_FRIEND:
-                        tox_friend_send_message(tox, TalkingTo/TALK_TYPE_COUNT, TOX_MESSAGE_TYPE_NORMAL, (uint8_t*)line, strlen(line), NULL);
+                        tox_friend_send_message(tox, INDEX_TO_NUM(TalkingTo), TOX_MESSAGE_TYPE_NORMAL, (uint8_t*)line, strlen(line), NULL);
                         continue; // continue to for_1
-                    case TALK_TYPE_CONFERENCE:
-                        tox_conference_send_message(tox, TalkingTo/TALK_TYPE_COUNT, TOX_MESSAGE_TYPE_NORMAL, (uint8_t*)line, strlen(line), NULL);
+                    case TALK_TYPE_GROUP:
+                        tox_conference_send_message(tox, INDEX_TO_NUM(TalkingTo), TOX_MESSAGE_TYPE_NORMAL, (uint8_t*)line, strlen(line), NULL);
                         continue;  // continue to for_1
                 }
             }
@@ -1228,7 +1277,7 @@ void repl_iterate(){
                         tokens[ntok] = tok;
                     }
                     if (ntok < cmd->narg - (cmd->narg >= COMMAND_ARGS_REST ? COMMAND_ARGS_REST : 0)) {
-                        ERROR("! wrong number of cmd args");
+                        WARN("Wrong number of cmd args");
                     } else {
                         cmd->handler(ntok, tokens);
                         if (SAVEDATA_AFTER_COMMAND) update_savedata_file();
@@ -1237,18 +1286,15 @@ void repl_iterate(){
                 }
             }
 
-            WARN("Invalid command, try `/help` instead.");
+            WARN("! Invalid command, use `/help` to get a list of available commands.");
         } // end for_1
     } // end while
     arepl_reprint(async_repl);
 }
 
-/////////////////////////////////////////////////
-// Main
-////////////////////////////////////////////////
-
 void exit_cb() {
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &saved_tattr);
+    tcsetattr(STDOUT_FILENO, TCSAFLUSH, &saved_oattr);
 }
 
 int main() {
