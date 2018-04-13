@@ -175,6 +175,8 @@ struct Friend {
     struct Friend *next;
 };
 
+int NEW_STDIN_FILENO = STDIN_FILENO;
+
 struct Friend *friends = NULL;
 
 struct Friend self;
@@ -385,11 +387,19 @@ struct AsyncREPL {
     int nstack;
 };
 
-struct termios saved_tattr, saved_oattr;
+struct termios saved_tattr;
 
 struct AsyncREPL *async_repl;
 
+void arepl_exit() {
+    tcsetattr(NEW_STDIN_FILENO, TCSAFLUSH, &saved_tattr);
+}
+
 void setup_arepl() {
+    if (!(isatty(STDIN_FILENO) && isatty(STDOUT_FILENO))) {
+        fputs("! stdout & stdin should be connected to tty", stderr);
+        exit(1);
+    }
     async_repl = malloc(sizeof(struct AsyncREPL));
     async_repl->nbuf = 0;
     async_repl->nstack = 0;
@@ -398,25 +408,37 @@ void setup_arepl() {
     async_repl->prompt = malloc(LINE_MAX_SIZE);
 
     strcpy(async_repl->prompt, CMD_PROMPT);
+    
+    // stdin and stdout may share the same file descriptor,
+    // reopen stdin to avoid accidentally modified stdout.
+
+    char stdin_path[4080];  // 4080 is large enough for a path length for *nix system.
+    if (fcntl(STDIN_FILENO, F_GETPATH, stdin_path) == -1) {
+        fputs("! fcntl get stdin filepath failed", stderr);
+        exit(1);
+    }
+    NEW_STDIN_FILENO = open(stdin_path, O_RDONLY);
+    if (NEW_STDIN_FILENO == -1) {
+        fputs("! reopen stdin failed",stderr);
+        exit(1);
+    }
+    close(STDIN_FILENO);
+
+    // Set stdin to Non-Blocking
+    int flags = fcntl(NEW_STDIN_FILENO, F_GETFL, 0);
+    fcntl(NEW_STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
+
 
     /* Set stdin to Non-Canonical terminal mode. */
     struct termios tattr;
-    tcgetattr(STDIN_FILENO, &tattr);
+    tcgetattr(NEW_STDIN_FILENO, &tattr);
     saved_tattr = tattr;  // save it to restore when exit
     tattr.c_lflag &= ~(ICANON|ECHO); /* Clear ICANON. */
     tattr.c_cc[VMIN] = 1;
     tattr.c_cc[VTIME] = 0;
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &tattr);
+    tcsetattr(NEW_STDIN_FILENO, TCSAFLUSH, &tattr);
 
-    struct termios oattr;
-    tcgetattr(STDOUT_FILENO, &oattr);
-    saved_oattr = oattr;
-    oattr.c_oflag &= ~OFDEL;  // wrap line when input rightmost column.
-    tcsetattr(STDOUT_FILENO, TCSAFLUSH, &oattr);
-
-    /* Set Non-Blocking stdin */
-    int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
-    fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
+    atexit(arepl_exit);
 }
 
 void arepl_reprint(struct AsyncREPL *arepl) {
@@ -1202,6 +1224,7 @@ void command_help(int narg, char **args){
     for (int i=1;i<COMMAND_LENGTH;i++) {
         printf("%-16s%s\n", commands[i].name, commands[i].desc);
     }
+    fflush(stdout);
 }
 
 /*******************************************************************************
@@ -1225,7 +1248,7 @@ void repl_iterate(){
     static char buf[128];
     static char line[LINE_MAX_SIZE];
     while (1) {
-        int n = read(STDIN_FILENO, buf, sizeof(buf));
+        int n = read(NEW_STDIN_FILENO, buf, sizeof(buf));
         if (n <= 0) {
             break;
         }
@@ -1292,10 +1315,6 @@ void repl_iterate(){
     arepl_reprint(async_repl);
 }
 
-void exit_cb() {
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &saved_tattr);
-    tcsetattr(STDOUT_FILENO, TCSAFLUSH, &saved_oattr);
-}
 
 int main() {
     fputs("Type `/guide` to print the guide.\n", stdout);
@@ -1305,8 +1324,6 @@ int main() {
     setup_tox();
 
     INFO("* Setting up tox, waiting to be online ...");
-
-    atexit(exit_cb);
 
     uint32_t msecs = 0;
     while (1) {
