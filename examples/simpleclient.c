@@ -409,14 +409,22 @@ void setup_arepl() {
 
     strcpy(async_repl->prompt, CMD_PROMPT);
     
-    // stdin and stdout may share the same file descriptor,
-    // reopen stdin to avoid accidentally modified stdout.
+    // stdin and stdout may share the same file obj,
+    // reopen stdin to avoid accidentally getting stdout modified.
 
     char stdin_path[4080];  // 4080 is large enough for a path length for *nix system.
+#ifdef F_GETPATH   // macosx
     if (fcntl(STDIN_FILENO, F_GETPATH, stdin_path) == -1) {
         fputs("! fcntl get stdin filepath failed", stderr);
         exit(1);
     }
+#else  // linux
+    if (readlink("/proc/self/fd/0", stdin_path, sizeof(stdin_path)) == -1) {
+        fputs("! get stdin filename failed", stderr);
+        exit(1);
+    }
+#endif
+
     NEW_STDIN_FILENO = open(stdin_path, O_RDONLY);
     if (NEW_STDIN_FILENO == -1) {
         fputs("! reopen stdin failed",stderr);
@@ -427,7 +435,6 @@ void setup_arepl() {
     // Set stdin to Non-Blocking
     int flags = fcntl(NEW_STDIN_FILENO, F_GETFL, 0);
     fcntl(NEW_STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
-
 
     /* Set stdin to Non-Canonical terminal mode. */
     struct termios tattr;
@@ -1208,7 +1215,7 @@ struct Command commands[] = {
     },
     {
         "invite",
-        "<friend_contact_index> [<group_contact_index>] - invite a friend to a group chat. if <group_contact_index> is empty, a new group will be created.",
+        "<friend_contact_index> [<group_contact_index>] - invite a friend to a group chat. default: create a group.",
         1 + COMMAND_ARGS_REST,
         command_invite,
     },
@@ -1323,7 +1330,7 @@ int main() {
     setup_arepl();
     setup_tox();
 
-    INFO("* Setting up tox, waiting to be online ...");
+    INFO("* Waiting to be online ...");
 
     uint32_t msecs = 0;
     while (1) {
