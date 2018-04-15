@@ -36,3 +36,5 @@ unify get name and get_name_size api;
 conference title 初始化不调用callback(跟friend不一致)
 
 get_name api accept length parm;
+
+inconsistency: broadcast group action: message, settitle
