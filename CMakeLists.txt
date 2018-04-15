@@ -604,6 +604,8 @@ target_link_modules(Messenger_test toxcore)
 #
 ################################################################################
 
-add_executable(simpleclient ${CPUFEATURES}
-  examples/simpleclient.c)
-target_link_modules(simpleclient toxcore)
+if(NOT WIN32)
+    add_executable(simpleclient ${CPUFEATURES}
+      examples/simpleclient.c)
+    target_link_modules(simpleclient toxcore)
+endif()
